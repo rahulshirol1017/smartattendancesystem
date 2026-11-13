@@ -1,0 +1,1024 @@
+PROJECT: VTU SMART ATTENDANCE MANAGEMENT SYSTEM
+
+Build a complete, modern, responsive web application called VTU Smart Attendance designed specifically for students studying under Visvesvaraya Technological University (VTU), Karnataka.
+
+The goal is to help students understand their attendance status, track subject-wise attendance, identify attendance shortages before they become a problem, and receive practical suggestions about which classes they need to attend to meet the required attendance percentage.
+
+The application should feel like a real university technology platform developed by an experienced product team. It must NOT look like a generic AI-generated dashboard, a template copied from the internet, or an over-designed SaaS landing page.
+
+The design should be clean, academic, trustworthy, functional, and easy for college students to use every day.
+
+1. DESIGN PHILOSOPHY
+
+Design the interface like an official university academic portal with the usability of a modern student productivity application.
+
+Follow these principles:
+
+* Professional university identity.
+* Simple, clean layouts with a clear visual hierarchy.
+* Natural, human-written text throughout the application.
+* Useful information displayed without unnecessary decoration.
+* Tables and charts that prioritize readability.
+* Consistent spacing, typography, borders, and component styles.
+* Subtle animations only where they improve usability.
+* No excessive gradients, glassmorphism, floating blobs, or unnecessary glowing effects.
+* No random emojis used as interface icons.
+* No oversized cards containing very little information.
+* No exaggerated AI-related branding or marketing language.
+* No fake notifications, fabricated attendance data presented as real, or non-functional buttons.
+
+The finished application should look like something a university or engineering college could realistically adopt.
+
+2. OFFICIAL VTU-INSPIRED COLOUR PALETTE
+
+Use the following colour palette consistently throughout the application.
+
+Primary colours
+
+Primary / Deep Navy:
+#0D233A
+
+Use for:
+
+* Top navigation bar.
+* Main page titles.
+* Sidebar background, if applicable.
+* Important headings.
+* Primary text on selected components.
+
+Secondary Accent / Royal Blue:
+#1B4F72
+
+Use for:
+
+* Active navigation items.
+* Secondary headings.
+* Selected tabs.
+* Links and interactive elements.
+* Chart accents.
+* Secondary buttons.
+
+Brand Highlight / Marigold Gold:
+#E5A93C
+
+Use for:
+
+* Important attendance alerts.
+* Active navigation indicators.
+* Key highlights.
+* Selected status indicators.
+* Important notices and reminders.
+
+Use gold sparingly so it remains meaningful.
+
+Background / Off-White:
+#F8F9FA
+
+Use for:
+
+* Main dashboard background.
+* Content sections.
+* Page backgrounds.
+
+Primary Text / Dark Charcoal:
+#212529
+
+Use for:
+
+* Paragraphs.
+* Tables.
+* Student information.
+* Labels and descriptions.
+
+Supporting colours
+
+Use a restrained supporting palette for status indicators:
+
+* Success green: #198754
+* Warning amber: #B7791F
+* Error red: #B42318
+* Information blue: #2563EB
+* White: #FFFFFF
+* Border grey: #DEE2E6
+* Muted text: #6C757D
+
+Keep the VTU-inspired navy, royal blue, and gold as the dominant brand colours.
+
+Do not turn the entire interface gold or blue. Maintain a light, readable background.
+
+3. TYPOGRAPHY AND VISUAL STYLE
+
+Use Inter, Source Sans 3, or a similar highly readable sans-serif typeface.
+
+Typography should be:
+
+* Professional.
+* Consistent.
+* Comfortable to read on laptops and mobile devices.
+* Clear in tables and numerical reports.
+
+Use moderate font weights rather than making every heading bold.
+
+Use:
+
+* A compact university-style header.
+* A structured sidebar on desktop.
+* A simple mobile navigation system.
+* Subtle card borders.
+* Small, consistent corner radii.
+* Adequate spacing between sections.
+* Thin dividers between table rows.
+
+Avoid making every component a rounded floating card.
+
+Use a mixture of:
+
+* Data tables.
+* Summary panels.
+* Progress indicators.
+* Charts.
+* Compact status badges.
+* Contextual notices.
+
+The interface should resemble a carefully designed academic management system rather than a trendy startup dashboard.
+
+4. APPLICATION STRUCTURE
+
+Create the following primary navigation sections:
+
+1. Dashboard
+2. My Attendance
+3. Subject Reports
+4. Attendance Planner
+5. Attendance Correction
+6. Timetable
+7. Reports & History
+8. Profile & Settings
+
+Use a persistent sidebar on desktop and a suitable responsive navigation pattern on mobile.
+
+The top header should contain:
+
+* VTU Smart Attendance branding.
+* Academic year and semester.
+* Student profile menu.
+* Notification indicator.
+* A clear page title.
+
+Do not falsely claim that the application is an official VTU product or affiliated with VTU unless authorization has been established.
+
+5. STUDENT DASHBOARD
+
+The dashboard should immediately answer five questions:
+
+1. What is my current overall attendance?
+2. Which subjects are putting me at risk?
+3. How many classes have I attended and missed?
+4. How many consecutive classes do I need to attend to reach the required percentage?
+5. Which subjects should I prioritize this week?
+
+Summary section
+
+Display the following metrics:
+
+* Overall attendance percentage.
+* Total classes conducted.
+* Total classes attended.
+* Total classes missed.
+* Number of subjects below the required threshold.
+* Number of subjects currently at risk.
+
+Calculate these values from actual stored attendance records.
+
+Do not hardcode the dashboard numbers.
+
+Overall attendance indicator
+
+Show the overall attendance percentage prominently.
+
+Include:
+
+* A clear percentage.
+* Attended classes versus conducted classes.
+* A compact progress bar or circular indicator.
+* A short explanation of the student’s current status.
+
+Example wording:
+
+“Your overall attendance is 82.4%. Two subjects need attention.”
+
+Generate this text dynamically from the actual data.
+
+Attendance alerts
+
+Create useful, context-aware alerts.
+
+Examples:
+
+“Data Structures is currently below the required attendance level. Check your attendance planner before missing another class.”
+
+“Your Computer Networks attendance is close to the minimum requirement. Attending the next few classes will help improve your position.”
+
+“You’re on track in Database Management Systems. Keep attending regularly.”
+
+These messages must depend on actual attendance data.
+
+Do not make every alert sound alarming. Use natural, calm, supportive language.
+
+Subject overview
+
+Display a compact table with:
+
+* Subject code.
+* Subject name.
+* Classes conducted.
+* Classes attended.
+* Classes missed.
+* Attendance percentage.
+* Required percentage.
+* Classes needed to recover.
+* Current status.
+* View details action.
+
+Allow students to sort the table by attendance percentage, subject name, and risk level.
+
+Use status labels such as:
+
+* On Track.
+* Needs Attention.
+* At Risk.
+* Insufficient Data.
+
+The status thresholds must be configurable and should not be represented as official VTU rules without verification.
+
+6. DETAILED SUBJECT-WISE ATTENDANCE REPORT
+
+This is one of the most important features.
+
+When a student opens a subject, display a dedicated report containing the complete attendance breakdown.
+
+Subject information
+
+Display:
+
+* Subject name.
+* Subject code.
+* Semester.
+* Faculty name, if available.
+* Total classes conducted.
+* Total classes attended.
+* Total classes missed.
+* Current attendance percentage.
+* Minimum required attendance percentage.
+* Difference between current attendance and the requirement.
+
+Detailed attendance table
+
+Create a table with:
+
+Date	Class/Period	Topic	Status	Recorded By	Record Source
+
+Possible attendance statuses:
+
+* Present.
+* Absent.
+* Excused, if supported by an authorized policy.
+* Pending verification.
+* Corrected.
+
+Allow filtering by:
+
+* Date range.
+* Attendance status.
+* Subject.
+* Record source.
+
+Allow students to open a record to see its available details and correction history.
+
+Attendance calculations
+
+For a simple class-count-based model:
+
+Attendance percentage = (Classes Attended / Total Classes Conducted) × 100.
+
+For example:
+
+Classes conducted: 50
+
+Classes attended: 40
+
+Classes missed: 10
+
+Attendance: 80%.
+
+Clearly document how cancelled classes, excused absences, and approved corrections affect the calculation.
+
+Do not assume that every institution uses the same attendance calculation method. Make the calculation method configurable to reflect the institution’s verified policy.
+
+If no classes have been conducted, display “Not available yet” rather than dividing by zero.
+
+Visual analytics
+
+Include a few useful visualizations:
+
+* Attendance percentage by subject.
+* Attendance trend over time.
+* Attended versus missed classes.
+* Comparison against the configured minimum requirement.
+
+Use charts only where they help students understand their situation.
+
+Provide labels, legends, and accessible colours. Never rely on colour alone to communicate attendance status.
+
+7. SMART ATTENDANCE PLANNER
+
+Create an attendance forecasting engine that tells students exactly how many upcoming classes they need to attend to reach their target.
+
+This feature must use mathematical calculations rather than arbitrary recommendations.
+
+Let:
+
+A = Number of classes attended.
+
+C = Number of classes conducted.
+
+T = Target attendance percentage expressed as a decimal.
+
+If the student attends every upcoming class, the minimum number of consecutive classes needed to reach the target is:
+
+N = max(0, ceil((T × C - A) / (1 - T)))
+
+This formula applies when 0 ≤ T < 1.
+
+If the target is already met, display zero additional classes required.
+
+If the target is 100% and the student has missed any class, explain that the target cannot be reached through future attendance alone under a simple class-count model.
+
+Always validate the calculation against the actual institution’s attendance rules.
+
+Example
+
+Current status:
+
+* Classes conducted: 40.
+* Classes attended: 28.
+* Classes missed: 12.
+* Current attendance: 70%.
+* Target attendance: 85%.
+
+If the student attends every upcoming class:
+
+Required consecutive classes = 40.
+
+After attending those 40 classes:
+
+* Total classes conducted: 80.
+* Total classes attended: 68.
+* Attendance: 85%.
+
+The planner should explain this in plain language:
+
+“Attend the next 40 classes in this subject without missing any to reach 85% attendance, assuming every future class is conducted and counted equally.”
+
+Do not simply display a number without explaining the assumption.
+
+Planner features
+
+Include:
+
+* Target attendance selector.
+* Subject selector.
+* Number of upcoming classes.
+* Projected attendance percentage.
+* Classes needed to reach the target.
+* Expected attendance if the student attends all upcoming classes.
+* A warning when the target is mathematically unreachable within the planned period.
+
+Allow students to enter hypothetical scenarios.
+
+Example:
+
+“What happens if I miss the next two classes?”
+
+Calculate and display the projected percentage.
+
+“What happens if I attend the next five classes?”
+
+Show the resulting percentage.
+
+Support multiple target percentages, such as 75%, 80%, 85%, and a custom target.
+
+Do not assume that 75% is the current official requirement for every VTU programme or subject. Load the applicable requirement from verified institutional policy or authorized configuration.
+
+8. PERSONALIZED ATTENDANCE RECOMMENDATIONS
+
+Create a practical recommendation engine using attendance percentages, class schedules, remaining classes, and configurable institutional rules.
+
+Examples:
+
+“Your Operating Systems attendance is 68%. Prioritize attending the upcoming classes for this subject.”
+
+“Your attendance in Computer Networks is 76%. You are currently above the configured minimum, but missing additional classes could put you at risk.”
+
+“Your Database Management Systems attendance is 88%. Continue attending regularly to maintain your current position.”
+
+“Your target may not be achievable within the remaining scheduled classes. Contact your faculty or academic office to discuss the applicable rules.”
+
+Recommendations must:
+
+* Be based on real calculations.
+* Explain why the recommendation appears.
+* Identify the relevant subject.
+* Show the number of classes required where calculable.
+* Distinguish current attendance from projected attendance.
+* Never guarantee that a student will be allowed to sit for an examination.
+
+Avoid generic messages such as “Keep working hard!” unless they provide useful context.
+
+The system should help students make informed decisions without creating unnecessary panic.
+
+9. EVIDENCE-BASED ATTENDANCE CORRECTION
+
+Create a transparent attendance correction workflow.
+
+A student may request a correction if an attendance record is incorrect.
+
+Examples:
+
+* The student was present, but the system marked them absent.
+* A faculty member recorded the wrong status.
+* A duplicate or incorrect record exists.
+* An authorized correction needs supporting documentation.
+
+IMPORTANT: Students must never be allowed to directly edit official attendance records.
+
+A student can submit a correction request, but the actual attendance record must only change after an authorized reviewer approves it.
+
+Correction request form
+
+Include:
+
+* Subject.
+* Date of the disputed class.
+* Class period.
+* Current recorded status.
+* Requested status.
+* Explanation of the issue.
+* Evidence upload.
+* Optional supporting notes.
+
+Possible supporting evidence:
+
+* A faculty confirmation.
+* An institutionally authorized attendance register extract.
+* A relevant classroom attendance record.
+* Other documents permitted by institutional policy.
+
+Do not require sensitive documents that are unnecessary for resolving the request.
+
+Correction workflow
+
+Implement the following states:
+
+1. Draft.
+2. Submitted.
+3. Under Review.
+4. Additional Evidence Requested.
+5. Approved.
+6. Rejected.
+7. Withdrawn.
+
+When a student submits a request:
+
+* Create a correction request.
+* Assign it a unique reference number.
+* Preserve the original attendance record.
+* Store the submission timestamp.
+* Store the evidence metadata securely.
+* Notify the appropriate authorized reviewer.
+
+When a reviewer approves a request:
+
+* Verify the evidence.
+* Update the attendance record through the authorized workflow.
+* Recalculate the affected subject’s attendance.
+* Update the overall attendance summary.
+* Record the approval details.
+* Preserve the previous value in the audit history.
+
+When a reviewer rejects a request:
+
+* Keep the original attendance unchanged.
+* Record the reason.
+* Notify the student.
+* Allow a resubmission or appeal if the institutional policy permits it.
+
+Audit trail
+
+Every approved correction must create an auditable history containing:
+
+* Original attendance status.
+* Corrected attendance status.
+* Subject and class reference.
+* Request ID.
+* Reason for correction.
+* Evidence reference.
+* Reviewer identity.
+* Approval or rejection timestamp.
+* Previous record version.
+* Correction status.
+
+Never permanently erase the original record.
+
+Only authorized faculty members, administrators, or other designated institutional officials should be able to approve corrections.
+
+The exact approval permissions should be configurable.
+
+Evidence security
+
+* Restrict access to uploaded evidence.
+* Validate file type and size.
+* Store files using private storage rather than publicly accessible URLs.
+* Prevent unauthorized users from accessing another student’s documents.
+* Record evidence access where appropriate.
+* Do not treat an uploaded document as automatically verified proof.
+* Display a clear notice that submitting evidence does not guarantee approval.
+
+10. ROLE-BASED ACCESS
+
+Create three roles.
+
+Student
+
+Students can:
+
+* View their own attendance.
+* View subject reports.
+* Use the attendance planner.
+* Submit correction requests.
+* Track correction request status.
+* View decisions and explanations.
+* Download permitted reports.
+
+Students must not be able to modify official attendance directly.
+
+Faculty
+
+Faculty can:
+
+* View attendance for assigned subjects and classes.
+* Review authorized student correction requests.
+* Inspect permitted supporting evidence.
+* Approve or reject correction requests.
+* Request additional evidence.
+* Record explanations for decisions.
+* View correction history.
+
+Faculty access must be restricted to their assigned subjects or other explicitly authorized academic responsibilities.
+
+Administrator
+
+Administrators can:
+
+* Manage student, faculty, subject, and semester records.
+* Configure attendance requirements.
+* Configure correction workflows.
+* Assign faculty to subjects.
+* Review authorized audit records.
+* Generate academic attendance reports.
+* Manage institutional settings.
+
+Use proper authentication and server-side role-based access control.
+
+Do not rely on hiding buttons in the frontend as the only authorization mechanism.
+
+11. TIMETABLE AND UPCOMING CLASSES
+
+Create a timetable section containing:
+
+* Day.
+* Time.
+* Subject.
+* Faculty.
+* Room or classroom.
+* Upcoming class date.
+* Class status, if available.
+
+Connect the timetable to the attendance planner.
+
+Use the timetable to provide useful context for recommendations.
+
+Example:
+
+“Three Database Management Systems classes are scheduled this week. Attending all three will improve your projected attendance.”
+
+Only make this calculation if the schedule and class-counting rules support it.
+
+Do not fabricate class schedules or assume a cancelled class will count as conducted.
+
+12. REPORTS AND DOWNLOADS
+
+Create downloadable reports for students and authorized faculty.
+
+Student attendance report
+
+Include:
+
+* Student information.
+* Semester.
+* Subject-wise attendance.
+* Classes attended.
+* Classes missed.
+* Current percentage.
+* Configured attendance requirement.
+* Attendance status.
+* Recommended next steps.
+* Report generation timestamp.
+
+Faculty report
+
+Include:
+
+* Subject attendance summary.
+* Student-wise attendance.
+* Students requiring attention.
+* Pending correction requests.
+* Approved and rejected corrections.
+
+Report features
+
+* Date-range filters.
+* Subject filters.
+* CSV export.
+* Print-friendly layout.
+* PDF export if practical.
+
+Reports must use actual data and enforce role-based access.
+
+13. DATABASE DESIGN
+
+Use MongoDB with Mongoose if implementing the backend in Node.js.
+
+Create a normalized, logically structured data model with appropriate references.
+
+Suggested collections:
+
+Users
+
+* Name.
+* University or college student identifier.
+* Email.
+* Password hash.
+* Role.
+* College.
+* Programme.
+* Semester.
+* Account status.
+
+Subjects
+
+* Subject code.
+* Subject name.
+* Semester.
+* Programme.
+* Attendance requirement.
+* Assigned faculty.
+* Academic year.
+
+Classes
+
+* Subject reference.
+* Date.
+* Start time.
+* End time.
+* Topic.
+* Class status.
+* Faculty reference.
+
+AttendanceRecords
+
+* Student reference.
+* Class reference.
+* Subject reference where appropriate.
+* Recorded attendance status.
+* Record source.
+* Recorded by.
+* Timestamp.
+* Correction version.
+
+AttendanceCorrectionRequests
+
+* Student reference.
+* Attendance record reference.
+* Original status.
+* Requested status.
+* Reason.
+* Evidence references.
+* Workflow status.
+* Reviewer reference.
+* Decision reason.
+* Created timestamp.
+* Updated timestamp.
+
+AttendanceAuditLogs
+
+* Attendance record reference.
+* Previous value.
+* New value.
+* Action.
+* Actor.
+* Correction request reference.
+* Timestamp.
+
+TimetableEntries
+
+* Subject reference.
+* Faculty reference.
+* Day.
+* Start time.
+* End time.
+* Classroom.
+* Validity period.
+
+Notifications
+
+* Recipient reference.
+* Notification type.
+* Message.
+* Related record reference.
+* Read status.
+* Timestamp.
+
+Implement indexes for frequently queried fields, including student, subject, class date, correction status, and relevant reference combinations.
+
+Use unique constraints where appropriate to prevent duplicate attendance entries for the same student and class.
+
+Design the data model so that subject reports and overall attendance can be calculated reliably.
+
+Use transactions or an equivalent safe update strategy when applying an approved correction and writing its audit record.
+
+Avoid storing the same attendance figures independently in multiple collections unless there is a clear, maintained reason to do so.
+
+14. TECHNICAL STACK
+
+Preferred stack:
+
+Frontend:
+
+* React.
+* Vite.
+* Tailwind CSS.
+* Lucide React icons.
+* Recharts for analytics.
+
+Backend:
+
+* Node.js.
+* Express.js.
+* MongoDB Atlas.
+* Mongoose.
+
+Authentication:
+
+* Secure password hashing.
+* HTTP-only secure cookies or an appropriately secured token-based implementation.
+* Server-side authorization middleware.
+
+File handling:
+
+* Private object storage or a secure server-side file storage solution.
+* File validation.
+* Access controls.
+
+Reports:
+
+* CSV export.
+* Print stylesheet.
+* PDF generation where appropriate.
+
+Use reusable components and a clear project structure.
+
+Suggested components:
+
+* AppLayout.
+* Sidebar.
+* Topbar.
+* AttendanceSummary.
+* SubjectAttendanceTable.
+* AttendanceTrendChart.
+* AttendancePlanner.
+* CorrectionRequestForm.
+* CorrectionStatusTimeline.
+* FacultyReviewPanel.
+* AuditHistoryTable.
+* ReportDownloadPanel.
+
+15. RESPONSIVE DESIGN
+
+The system must work properly on:
+
+* Desktop.
+* Laptop.
+* Tablet.
+* Mobile phones.
+
+On mobile:
+
+* Keep navigation simple.
+* Make tables horizontally scrollable or convert rows into readable stacked layouts.
+* Ensure buttons are easy to tap.
+* Make charts fit the screen.
+* Prevent content from overflowing horizontally.
+* Keep attendance percentages and critical warnings visible.
+
+Do not simply shrink the desktop layout to fit a phone.
+
+16. INTERACTION AND FUNCTIONALITY
+
+All visible controls must work.
+
+Implement:
+
+* Working navigation.
+* Search and filters.
+* Sorting.
+* Subject details.
+* Attendance calculations.
+* Planner scenarios.
+* Correction submission.
+* Evidence upload.
+* Faculty review.
+* Audit history.
+* Notifications.
+* Report export.
+* Loading states.
+* Empty states.
+* Error handling.
+* Form validation.
+* Confirmation dialogs for important actions.
+
+Use meaningful loading indicators and clear error messages.
+
+Avoid fake interactions, dead buttons, placeholder links, and forms that only display success messages without saving anything.
+
+17. HUMAN-CENTRED MICROCOPY
+
+The application should sound like a helpful academic assistant, not a chatbot.
+
+Use short, natural sentences.
+
+Good examples:
+
+“Here’s how your attendance stands this semester.”
+
+“Two subjects need your attention.”
+
+“You’re currently below the required attendance level for this subject.”
+
+“Attending the next six classes would bring your attendance to approximately 82%, assuming all six classes take place.”
+
+“Your correction request has been submitted. You can follow its progress here.”
+
+“The faculty reviewer has requested additional evidence.”
+
+“Your attendance record has been updated following approval.”
+
+Avoid repetitive phrases such as:
+
+* “Unlock your academic potential.”
+* “Experience the power of AI.”
+* “Revolutionize your attendance journey.”
+* “Seamlessly leverage intelligent insights.”
+* “Your personalized AI-powered academic ecosystem.”
+
+Do not add an AI chatbot just to make the application appear intelligent.
+
+The main intelligence should come from accurate calculations, useful forecasts, evidence-based workflows, and clear reporting.
+
+18. SAMPLE DATA AND DEMONSTRATION MODE
+
+Provide a clearly labelled demonstration mode with fictional students, subjects, faculty, classes, and attendance records.
+
+Use realistic engineering subjects such as:
+
+* Data Structures and Applications.
+* Database Management Systems.
+* Operating Systems.
+* Computer Networks.
+* Software Engineering.
+* Mathematics.
+
+Do not present fictional records as official VTU data.
+
+Allow users to test:
+
+* Different attendance percentages.
+* Subjects above and below the requirement.
+* Multiple planner scenarios.
+* Correction requests.
+* Evidence review.
+* Approval and rejection workflows.
+* Attendance report generation.
+
+Keep demonstration data separate from real student records.
+
+19. ACCESSIBILITY AND SECURITY
+
+Follow basic accessibility and security practices.
+
+Accessibility:
+
+* Semantic HTML.
+* Keyboard navigation.
+* Visible focus states.
+* Readable contrast.
+* Accessible form labels.
+* Chart descriptions.
+* Screen-reader-friendly status messages.
+
+Security:
+
+* Validate input on both frontend and backend.
+* Hash passwords securely.
+* Protect authenticated routes.
+* Enforce role-based authorization on the server.
+* Validate uploads.
+* Prevent unauthorized record changes.
+* Maintain audit logs.
+* Avoid exposing sensitive student information in public APIs or logs.
+
+Never let a student change their attendance percentage manually.
+
+The percentage must be derived from authorized attendance records and the applicable calculation policy.
+
+20. IMPORTANT VTU POLICY REQUIREMENTS
+
+This application is designed for VTU students, but the software must not invent official university rules.
+
+Make the following configurable:
+
+* Minimum attendance percentage.
+* Subject-specific attendance requirements.
+* Semester and academic year.
+* Treatment of cancelled classes.
+* Treatment of approved absences.
+* Calculation method.
+* Correction approval permissions.
+* Evidence requirements.
+* Appeal procedure.
+
+Use verified, current VTU regulations and the relevant college’s authorized policies when configuring these settings.
+
+Clearly distinguish:
+
+* Current attendance.
+* Projected attendance.
+* Institutional eligibility requirements.
+* Pending correction requests.
+* Approved corrections.
+
+Do not promise examination eligibility based solely on a calculated attendance percentage.
+
+21. FINAL IMPLEMENTATION REQUIREMENTS
+
+Build the actual working application, not just a design mockup.
+
+Follow this development sequence:
+
+1. Create the project structure.
+2. Implement the design system using the specified VTU-inspired colours.
+3. Build the main dashboard and responsive navigation.
+4. Implement the database models.
+5. Implement authentication and role-based permissions.
+6. Implement attendance calculations.
+7. Build the subject-wise attendance reports.
+8. Build the attendance planner and forecasting logic.
+9. Implement correction requests and secure evidence handling.
+10. Build the faculty review workflow.
+11. Implement audit logging.
+12. Build downloadable reports.
+13. Add realistic demonstration data.
+14. Test the main workflows and calculations.
+15. Fix runtime errors and verify responsive behaviour.
+
+Use clean, maintainable code and meaningful file names.
+
+Do not stop after creating the homepage. Complete the essential workflows end to end.
+
+If database credentials or external services are unavailable, clearly document what needs configuration and provide a working local demonstration mode.
+
+FINAL DESIGN EXPECTATION
+
+Imagine a student opening the application before college.
+
+They should immediately understand:
+
+* How their attendance is going.
+* Which subject requires attention.
+* Exactly how many classes they should attend to reach their target.
+* What happens if they miss upcoming classes.
+* How to request a correction when their attendance is recorded incorrectly.
+
+The design should communicate trust, clarity, and academic professionalism.
+
+The final product should feel like a thoughtfully designed university attendance system built for real students, using VTU-inspired colours and human-centred language—not an AI-generated dashboard template.

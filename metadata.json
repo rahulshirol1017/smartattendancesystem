@@ -1,0 +1,6 @@
+{
+  "name": "VTU Smart Attendance",
+  "description": "Academic attendance tracking, subject-wise reporting, mathematical class forecasting, and evidence-based attendance correction platform designed for VTU engineering students, faculty, and administrators.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

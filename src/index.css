@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --vtu-green: #165B33;
+    --vtu-green-dark: #104526;
+    --vtu-saffron: #DF6A24;
+    --vtu-parchment: #FAF3E3;
+    --vtu-surface: #FFFFFF;
+    --vtu-surface-warm: #FFFDF8;
+    --vtu-text: #241710;
+    --vtu-muted: #6B5A4C;
+    --vtu-border: #E3D2B4;
+    --vtu-success: #165B33;
+    --vtu-warning: #B45309;
+    --vtu-danger: #B42318;
+  }
+
+  body {
+    font-family: 'Public Sans', 'Source Sans 3', system-ui, -apple-system, sans-serif;
+    background-color: #FAF3E3;
+    color: #241710;
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Plus Jakarta Sans', 'Public Sans', system-ui, sans-serif;
+    text-wrap: balance;
+  }
+
+  .font-mono, .tabular-nums {
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background-color: #FFFFFF !important;
+    color: #000000 !important;
+    font-size: 12px;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .print-container {
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+}
