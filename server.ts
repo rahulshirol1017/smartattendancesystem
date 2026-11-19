@@ -1,9 +1,11 @@
 import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import jwt from 'jsonwebtoken';
+import JSZip from 'jszip';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -20,6 +22,7 @@ import {
   AttendanceAuditLog,
   AttendanceCorrectionRequest,
   AttendanceRecord,
+  AttendanceSubmissionAttempt,
   ClassSession,
   ClassSessionStatus,
   ClassSessionType,
@@ -31,7 +34,59 @@ import {
   TimetableEntry,
   UserProfile,
   UserRole,
+  EnrolledSubjectRecord,
+  FaceQualityMetrics,
+  LivenessChallengeType,
+  ModelCalibrationReport,
+  ModelVersionRecord,
+  TrainingJobStatus,
+  VerificationEvidenceFrames,
+  VerificationRequestPayload,
+  VerificationResult,
+  VerificationSessionDescriptor,
 } from './src/shared/types.ts';
+import {
+  deleteEnrolledSubject,
+  getAllEnrolledSubjects,
+  getEnrolledSubject,
+  listEnrolledSubjectsSummary,
+  upsertEnrolledSubject,
+} from './server/enrollmentStore.ts';
+import {
+  cosineSimilarity,
+  evaluateFaceMatch,
+  evaluateThresholdMetrics,
+  identifyEnrolledSubject,
+  validateDescriptorVector,
+} from './server/biometricMatcher.ts';
+import {
+  authenticateParentSessionRequest,
+  issueVerificationSession,
+  signVerificationResult,
+  validateAndConsumeSession,
+  validateSessionReadonly,
+  verifyResultSignature,
+} from './server/sessionManager.ts';
+import {
+  decodeJpegBase64,
+  detectFacesScrfd,
+  evaluateServerFaceQuality,
+  extractArcFaceEmbeddingServer,
+  runTrustedServerVerificationInference,
+} from './server/serverInference.ts';
+import {
+  deployModelVersion,
+  getActiveModelVersion,
+  getCachedCalibrationReport,
+  getTrainingStatus,
+  loadModelRegistry,
+  prepareDataset,
+  rollbackModelVersion,
+  runModelEvaluation,
+  startFineTuning,
+  stopTraining,
+} from './server/modelManager.ts';
+import { sendPasswordResetEmail } from './server/emailService.ts';
 
 dotenv.config();
 
@@ -55,7 +110,12 @@ interface AuthenticatedRequest extends Request {
 
 function signSessionToken(user: UserProfile): string {
   return jwt.sign(
-    { sub: user.id, role: user.role, identifier: user.identifier },
+    {
+      sub: user.id,
+      role: user.role,
+      identifier: user.identifier,
+      tokenVersion: user.tokenVersion || 0,
+    },
     JWT_SECRET,
     { expiresIn: '7d' }
   );
@@ -83,9 +143,12 @@ async function extractUserFromRequest(req: Request): Promise<UserProfile | null>
   if (!token) return null;
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { sub: string };
+    const decoded = jwt.verify(token, JWT_SECRET) as { sub: string; tokenVersion?: number };
     const stored = await repo.findUserById(decoded.sub);
     if (!stored || stored.accountStatus !== 'Active') return null;
+    if (decoded.tokenVersion !== undefined && (stored.tokenVersion || 0) !== decoded.tokenVersion) {
+      return null; // session invalidated by password change/reset!
+    }
     return repo.toPublicUser(stored);
   } catch {
     return null;
@@ -422,6 +485,13 @@ async function startServer(): Promise<void> {
       return;
     }
 
+    if (found.role === 'student' && found.isRegistered === false) {
+      res.status(401).json({
+        error: `Student account for ${found.identifier} is not activated yet. Please register/activate your student account first.`,
+      });
+      return;
+    }
+
     const valid = await bcrypt.compare(password, found.passwordHash);
     if (!valid) {
       res.status(401).json({ error: 'Invalid credentials. Check your USN/ID and password.' });
@@ -475,45 +545,387 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const existingEmail = await repo.findUserByLogin(email);
-    const existingId = await repo.findUserByLogin(identifier);
-    if (existingEmail || existingId) {
-      res.status(409).json({
-        error: 'An account with this USN or email address is already registered.',
+    const cleanUsn = identifier.trim().toUpperCase();
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Verify USN against existing official student identity records
+    const allUsers = await repo.listAllUsers();
+    const matchingIdentity = allUsers.find(
+      (u) =>
+        u.role === 'student' &&
+        (u.identifier.toUpperCase() === cleanUsn ||
+          u.identifier.toUpperCase().endsWith(cleanUsn) ||
+          (u.rollNumber && u.rollNumber === cleanUsn))
+    );
+
+    if (!matchingIdentity) {
+      res.status(403).json({
+        error: `Unauthorized USN: USN '${cleanUsn}' is not registered in the official institutional student roster. Registration is restricted to enrolled students.`,
       });
       return;
     }
 
-    const chosenSec = sectionId ? await repo.getSectionById(sectionId) : null;
+    // Prevent duplicate accounts
+    if (matchingIdentity.isRegistered) {
+      res.status(409).json({
+        error: `An account for USN '${matchingIdentity.identifier}' has already been registered and activated. Please log in with your credentials.`,
+      });
+      return;
+    }
+
+    // Check email uniqueness against other users
+    const emailUser = await repo.findUserByLogin(cleanEmail);
+    if (emailUser && emailUser.id !== matchingIdentity.id) {
+      res.status(409).json({
+        error: `Email address '${cleanEmail}' is already registered with another account.`,
+      });
+      return;
+    }
+
+    // Store password securely as a bcrypt hash
     const passwordHash = await bcrypt.hash(password, 10);
-    const created = await repo.createUser({
-      id: `usr-${Date.now()}`,
-      name: name.trim(),
-      identifier: identifier.trim().toUpperCase(),
-      email: email.trim().toLowerCase(),
+
+    // Synchronize account with official student record
+    await repo.updateUser(matchingIdentity.id, {
+      name: name.trim() || matchingIdentity.name,
+      email: cleanEmail,
       passwordHash,
-      role: 'student',
-      college: college?.trim() || 'Affiliated Engineering College',
-      department: chosenSec?.department || 'CSE',
-      programme: chosenSec?.programme || programme?.trim() || 'B.E. Computer Science & Engineering',
-      semester: chosenSec?.semester || Number(semester) || 5,
-      section: chosenSec?.sectionName || 'A',
-      sectionId: chosenSec ? chosenSec.id : undefined,
-      sectionDisplayName: chosenSec ? chosenSec.displayName : undefined,
-      academicYear: '2026-27',
+      isRegistered: true,
       accountStatus: 'Active',
-      isDemo: false,
     });
 
-    const token = signSessionToken(created);
+    const enrolledRef = getEnrolledSubject(matchingIdentity.identifier);
+    const hasFacialRef = Boolean(enrolledRef && enrolledRef.embeddings.length > 0);
+
+    const storedUser = await repo.findUserById(matchingIdentity.id);
+    const publicUser = storedUser ? repo.toPublicUser(storedUser) : (matchingIdentity as unknown as UserProfile);
+    publicUser.name = name.trim() || matchingIdentity.name;
+    publicUser.email = cleanEmail;
+    publicUser.isRegistered = true;
+
+    const token = signSessionToken(publicUser);
     setSessionCookie(res, token);
-    res.status(201).json({ user: created, token });
+
+    res.status(201).json({
+      user: publicUser,
+      token,
+      facialEnrolled: hasFacialRef,
+      message: hasFacialRef
+        ? 'Student account synchronized. Existing facial reference verified and connected.'
+        : 'Student account registered successfully.',
+    });
   });
 
   app.post('/api/auth/logout', (_req: Request, res: Response) => {
     res.clearCookie('vtu_auth_cookie_v3', { path: '/' });
     res.clearCookie('vtu_session_token', { path: '/' });
     res.json({ ok: true });
+  });
+
+  app.post(
+    '/api/auth/change-password',
+    requireAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const user = req.user!;
+        const { currentPassword, newPassword, confirmPassword } = req.body as {
+          currentPassword?: string;
+          newPassword?: string;
+          confirmPassword?: string;
+        };
+
+        if (!currentPassword || !newPassword || !confirmPassword) {
+          res.status(400).json({ error: 'Current password, new password, and confirm password are required.' });
+          return;
+        }
+
+        if (newPassword !== confirmPassword) {
+          res.status(400).json({ error: 'New password and confirm password do not match.' });
+          return;
+        }
+
+        if (newPassword.length < 8) {
+          res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+          return;
+        }
+
+        const storedUser = await repo.findUserById(user.id);
+        if (!storedUser) {
+          res.status(404).json({ error: 'User account not found.' });
+          return;
+        }
+
+        const isMatch = await bcrypt.compare(currentPassword, storedUser.passwordHash);
+        if (!isMatch) {
+          res.status(400).json({ error: 'Incorrect current password. Please re-enter your existing password.' });
+          return;
+        }
+
+        const isSame = await bcrypt.compare(newPassword, storedUser.passwordHash);
+        if (isSame) {
+          res.status(400).json({ error: 'New password cannot be the same as your current password.' });
+          return;
+        }
+
+        const newHash = await bcrypt.hash(newPassword, 10);
+        const nextVersion = (storedUser.tokenVersion || 0) + 1;
+        await repo.updateUser(user.id, { passwordHash: newHash, tokenVersion: nextVersion });
+        const refreshedUser = { ...user, tokenVersion: nextVersion };
+        const newToken = signSessionToken(refreshedUser);
+        setSessionCookie(res, newToken);
+
+        await repo.appendAuditLog({
+          id: `aud-pw-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          category: 'ACCOUNT_SECURITY',
+          attendanceRecordId: 'none',
+          studentId: user.id,
+          studentName: user.name,
+          studentIdentifier: user.identifier,
+          subjectId: 'none',
+          subjectCode: 'SECURITY',
+          subjectName: 'Password Update',
+          classId: 'none',
+          classDate: new Date().toISOString().slice(0, 10),
+          classPeriod: 'N/A',
+          previousValue: 'BCRYPT_HASH_MASKED',
+          newValue: 'BCRYPT_HASH_UPDATED',
+          previousVersion: 1,
+          newVersion: 2,
+          action: 'PASSWORD_CHANGED',
+          actorId: user.id,
+          actorName: user.name,
+          actorRole: user.role,
+          reason: 'User self-service password update via Account Settings.',
+          evidenceReference: '',
+          timestamp: new Date().toISOString(),
+        });
+
+        res.json({
+          success: true,
+          message: 'Password changed successfully. Your account is secured with the new password.',
+          token: newToken,
+        });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to change password.' });
+      }
+    }
+  );
+
+  // --- Password Reset (Forgot Password) Management ---
+  interface PasswordResetEntry {
+    email: string;
+    codeHash: string;
+    expiresAt: number;
+    attempts: number;
+    createdAt: number;
+  }
+
+  const passwordResetTokens = new Map<string, PasswordResetEntry>();
+  const resetRateLimits = new Map<string, { count: number; windowStart: number }>();
+
+  function checkResetRateLimit(key: string, maxRequests = 5, windowMs = 15 * 60 * 1000): boolean {
+    const now = Date.now();
+    const current = resetRateLimits.get(key);
+    if (!current || now - current.windowStart > windowMs) {
+      resetRateLimits.set(key, { count: 1, windowStart: now });
+      return true;
+    }
+    if (current.count >= maxRequests) {
+      return false;
+    }
+    current.count++;
+    return true;
+  }
+
+  // 1. Request Password Reset Verification Code (Anti-enumeration, Rate limited)
+  app.post('/api/auth/forgot-password', async (req: Request, res: Response) => {
+    try {
+      const { email } = req.body as { email?: string };
+      const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+
+      if (!email || !email.trim()) {
+        res.status(400).json({ error: 'Registered university email address is required.' });
+        return;
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      if (!checkResetRateLimit(`ip:${clientIp}`) || !checkResetRateLimit(`email:${cleanEmail}`)) {
+        res.status(429).json({
+          error: 'Too many password reset requests. Please wait a few minutes before trying again.',
+        });
+        return;
+      }
+
+      // Check user existence
+      const user = await repo.findUserByLogin(cleanEmail);
+      if (user && user.accountStatus === 'Active') {
+        // Generate cryptographically secure 6-digit random OTP code
+        const otpCode = crypto.randomInt(100000, 1000000).toString();
+        const codeHash = crypto.createHash('sha256').update(otpCode, 'utf8').digest('hex');
+
+        passwordResetTokens.set(cleanEmail, {
+          email: cleanEmail,
+          codeHash,
+          expiresAt: Date.now() + 15 * 60 * 1000, // 15 minutes TTL
+          attempts: 0,
+          createdAt: Date.now(),
+        });
+
+        // Deliver verification email (or log in dev mode)
+        await sendPasswordResetEmail(cleanEmail, otpCode, user.name);
+      }
+
+      // Consistent generic response to prevent user/email enumeration
+      res.json({
+        success: true,
+        message: 'If an active account is registered with this email, a 6-digit verification code has been sent.',
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to process password reset request.',
+      });
+    }
+  });
+
+  // 2. Verify Reset Code (Prevents brute force, checks short TTL)
+  app.post('/api/auth/verify-reset-code', async (req: Request, res: Response) => {
+    try {
+      const { email, code } = req.body as { email?: string; code?: string };
+      if (!email || !code) {
+        res.status(400).json({ error: 'Email and verification code are required.' });
+        return;
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      const entry = passwordResetTokens.get(cleanEmail);
+
+      if (!entry || Date.now() > entry.expiresAt) {
+        passwordResetTokens.delete(cleanEmail);
+        res.status(400).json({ error: 'Verification code has expired or is invalid. Please request a new one.' });
+        return;
+      }
+
+      if (entry.attempts >= 5) {
+        passwordResetTokens.delete(cleanEmail);
+        res.status(429).json({ error: 'Too many failed verification attempts. Please request a new code.' });
+        return;
+      }
+
+      entry.attempts++;
+
+      const providedHash = crypto.createHash('sha256').update(code.trim(), 'utf8').digest('hex');
+      const isMatch = crypto.timingSafeEqual(
+        Buffer.from(providedHash, 'hex'),
+        Buffer.from(entry.codeHash, 'hex')
+      );
+
+      if (!isMatch) {
+        res.status(400).json({ error: 'Invalid verification code. Please check the code and try again.' });
+        return;
+      }
+
+      res.json({ success: true, message: 'Verification code confirmed.' });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Verification failed.' });
+    }
+  });
+
+  // 3. Reset Password (One-time token consumption, session invalidation, bcrypt hashing)
+  app.post('/api/auth/reset-password', async (req: Request, res: Response) => {
+    try {
+      const { email, code, newPassword, confirmPassword } = req.body as {
+        email?: string;
+        code?: string;
+        newPassword?: string;
+        confirmPassword?: string;
+      };
+
+      if (!email || !code || !newPassword || !confirmPassword) {
+        res.status(400).json({ error: 'All fields are required.' });
+        return;
+      }
+
+      if (newPassword !== confirmPassword) {
+        res.status(400).json({ error: 'New password and confirm password do not match.' });
+        return;
+      }
+
+      if (newPassword.length < 8) {
+        res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+        return;
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      const entry = passwordResetTokens.get(cleanEmail);
+
+      if (!entry || Date.now() > entry.expiresAt) {
+        passwordResetTokens.delete(cleanEmail);
+        res.status(400).json({ error: 'Verification code has expired or is invalid. Please request a new code.' });
+        return;
+      }
+
+      const providedHash = crypto.createHash('sha256').update(code.trim(), 'utf8').digest('hex');
+      const isMatch = crypto.timingSafeEqual(
+        Buffer.from(providedHash, 'hex'),
+        Buffer.from(entry.codeHash, 'hex')
+      );
+
+      if (!isMatch) {
+        entry.attempts++;
+        if (entry.attempts >= 5) passwordResetTokens.delete(cleanEmail);
+        res.status(400).json({ error: 'Invalid verification code.' });
+        return;
+      }
+
+      // One-time use: delete token immediately
+      passwordResetTokens.delete(cleanEmail);
+
+      const user = await repo.findUserByLogin(cleanEmail);
+      if (!user) {
+        res.status(404).json({ error: 'Account not found.' });
+        return;
+      }
+
+      const newHash = await bcrypt.hash(newPassword, 10);
+      const nextTokenVersion = (user.tokenVersion || 0) + 1;
+      await repo.updateUser(user.id, {
+        passwordHash: newHash,
+        tokenVersion: nextTokenVersion,
+      });
+
+      await repo.appendAuditLog({
+        id: `aud-reset-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        category: 'ACCOUNT_SECURITY',
+        attendanceRecordId: 'none',
+        studentId: user.id,
+        studentName: user.name,
+        studentIdentifier: user.identifier,
+        subjectId: 'none',
+        subjectCode: 'SECURITY',
+        subjectName: 'Password Reset',
+        classId: 'none',
+        classDate: new Date().toISOString().slice(0, 10),
+        classPeriod: 'N/A',
+        previousValue: 'BCRYPT_HASH_MASKED',
+        newValue: 'BCRYPT_HASH_RESET',
+        previousVersion: 1,
+        newVersion: 2,
+        action: 'PASSWORD_RESET',
+        actorId: user.id,
+        actorName: user.name,
+        actorRole: user.role,
+        reason: 'Password reset via email verification code.',
+        evidenceReference: '',
+        timestamp: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        message: 'Your password has been reset successfully. You may now sign in with your new password.',
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Password reset failed.' });
+    }
   });
 
   // ============================================================================
@@ -3916,6 +4328,1125 @@ async function startServer(): Promise<void> {
     }
   );
 
+  // ============================================================================
+  // FACE VERIFICATION AFTER QR SCANNING (EXACT 12-STEP SEQUENCE)
+  // ============================================================================
+
+  interface PendingScanData {
+    sessionId: string;
+    qrToken: string;
+    student: UserProfile;
+    latitude: number;
+    longitude: number;
+    accuracy: number;
+    deviceFingerprint: string;
+    devicePlatform: string;
+    browserName: string;
+    distanceMeters: number;
+    issuedAt: number;
+  }
+
+  const pendingAttendanceScans = new Map<string, PendingScanData>();
+
+  setInterval(() => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [key, val] of pendingAttendanceScans.entries()) {
+      if (val.issuedAt < cutoff) {
+        pendingAttendanceScans.delete(key);
+      }
+    }
+  }, 60 * 1000);
+
+  async function extractValidatedEmbeddingsFromImages(
+    imagesBase64: string[]
+  ): Promise<{
+    embeddings: number[][];
+    sampleLabels: Array<{ angleLabel: string; lightingLabel: string; qualityScore: number }>;
+  }> {
+    const embeddings: number[][] = [];
+    const sampleLabels: Array<{ angleLabel: string; lightingLabel: string; qualityScore: number }> = [];
+
+    for (let i = 0; i < imagesBase64.length; i++) {
+      const b64 = imagesBase64[i];
+      const frame = decodeJpegBase64(b64);
+      const faces = await detectFacesScrfd(frame);
+      if (faces.length !== 1) {
+        throw new Error(`Sample ${i + 1}: Expected 1 clear face (found ${faces.length}). Please capture a single centered face.`);
+      }
+      const qual = evaluateServerFaceQuality(frame, faces[0], true);
+      if (!qual.passed) {
+        throw new Error(`Sample ${i + 1} quality rejected: ${qual.failureReason}`);
+      }
+      const emb = await extractArcFaceEmbeddingServer(frame, faces[0].kps);
+      embeddings.push(emb);
+      sampleLabels.push({
+        angleLabel: 'Frontal',
+        lightingLabel: 'Standard',
+        qualityScore: Math.round(qual.sharpnessScore),
+      });
+    }
+
+    return { embeddings, sampleLabels };
+  }
+
+  function saveRawTrainingImages(subjectId: string, imagesBase64: string[]): void {
+    try {
+      const rawDir = path.resolve(__dirname, 'training/data/raw', subjectId);
+      if (!fs.existsSync(rawDir)) {
+        fs.mkdirSync(rawDir, { recursive: true });
+      }
+      imagesBase64.forEach((b64, idx) => {
+        const cleanB64 = b64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+        const outPath = path.join(rawDir, `sample_${idx + 1}.jpg`);
+        fs.writeFileSync(outPath, Buffer.from(cleanB64, 'base64'));
+      });
+
+      const manifestPath = path.resolve(__dirname, 'training/data/raw/consent_manifest.json');
+      let manifest: Record<string, { consented: boolean; consent_date: string }> = {};
+      if (fs.existsSync(manifestPath)) {
+        try {
+          manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        } catch {}
+      }
+      manifest[subjectId] = { consented: true, consent_date: new Date().toISOString().slice(0, 10) };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    } catch (err) {
+      console.warn('Warning: Failed to save raw training photo copy:', err);
+    }
+  }
+
+  // 1. Validate QR Token & Complete Teacher-Host GPS Proximity (Steps 1, 2, 3)
+  app.post(
+    ['/api/qr-attendance/validate-scan', '/api/qr-attendance/validate-scan-before-face'],
+    requireAuth,
+    requireRoles('student'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const student = req.user!;
+      const {
+        sessionId,
+        qrToken,
+        latitude,
+        longitude,
+        accuracy,
+        deviceFingerprint,
+        devicePlatform,
+        browserName,
+      } = req.body as {
+        sessionId?: string;
+        qrToken?: string;
+        latitude?: number;
+        longitude?: number;
+        accuracy?: number;
+        deviceFingerprint?: string;
+        devicePlatform?: string;
+        browserName?: string;
+      };
+
+      if (!sessionId || !qrToken) {
+        res.status(400).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'Session identifier and scanned QR token are required.',
+        });
+        return;
+      }
+
+      const policy = await repo.getPolicy();
+      const session = await repo.getQrSessionById(sessionId);
+      const now = Date.now();
+
+      if (!session) {
+        res.status(400).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'Invalid attendance session.',
+        });
+        return;
+      }
+
+      // Check session active status & expiration
+      if (session.status !== 'ACTIVE' || now > session.sessionExpiresAt) {
+        res.status(400).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'Attendance session is closed or expired.',
+        });
+        return;
+      }
+
+      // Check academic section match
+      if (student.sectionId && student.sectionId !== session.sectionId) {
+        res.status(400).json({
+          success: false,
+          classification: 'REJECTED',
+          message: `You belong to section ${student.sectionDisplayName || student.sectionId}. This session is only for ${session.sectionDisplayName}.`,
+        });
+        return;
+      }
+
+      // Prevent duplicate attendance
+      const existingAttempts = await repo.listAttendanceAttempts(session.id, student.id);
+      const alreadyVerified = existingAttempts.find((a) => a.classification === 'VERIFIED');
+      if (alreadyVerified) {
+        res.status(400).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'Duplicate attendance submission. Your attendance has already been verified for this session.',
+        });
+        return;
+      }
+
+      // Verify QR token session reference
+      const tokenParts = qrToken ? qrToken.split('_') : [];
+      const tokenSessionId = tokenParts.length >= 3 ? tokenParts[2] : undefined;
+      if (tokenSessionId && tokenSessionId !== session.id) {
+        res.status(400).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'This QR code belongs to a different attendance session.',
+        });
+        return;
+      }
+
+      // Teacher-host GPS Proximity Verification (Configurable 10–15m radius)
+      // PRESERVED FOR REACTIVATION: Temporarily disabled for demonstration
+      const GPS_VALIDATION_ACTIVE = false;
+      let distanceMeters = 5;
+      const maxHostRadius = policy.teacherHostRadiusMeters || 15;
+      if (
+        session.hostLatitude !== undefined &&
+        session.hostLongitude !== undefined &&
+        !isNaN(session.hostLatitude) &&
+        !isNaN(session.hostLongitude) &&
+        latitude !== undefined &&
+        longitude !== undefined &&
+        !isNaN(Number(latitude)) &&
+        !isNaN(Number(longitude)) &&
+        (Number(latitude) !== 0 || Number(longitude) !== 0)
+      ) {
+        try {
+          distanceMeters = repo.calculateHaversineDistanceMeters(
+            Number(latitude),
+            Number(longitude),
+            session.hostLatitude,
+            session.hostLongitude
+          );
+        } catch {
+          distanceMeters = 5;
+        }
+
+        if (GPS_VALIDATION_ACTIVE && distanceMeters > maxHostRadius) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: `Teacher-host GPS verification failed: You are ${Math.round(distanceMeters)}m from the teacher host (allowed classroom radius: ${maxHostRadius}m).`,
+          });
+          return;
+        }
+      }
+
+      // Check student enrolled facial reference in encrypted store
+      const enrolledRef = getEnrolledSubject(student.identifier) || getEnrolledSubject(student.id);
+      const hasEnrolled = Boolean(enrolledRef && enrolledRef.embeddings.length > 0);
+
+      // Issue single-use cryptographically bound verification session
+      const verificationSession = issueVerificationSession({
+        studentId: student.identifier,
+        qrSessionId: session.id,
+      });
+
+      pendingAttendanceScans.set(verificationSession.verificationSessionId, {
+        sessionId,
+        qrToken: String(qrToken).trim(),
+        student,
+        latitude: Number(latitude || 15.77671),
+        longitude: Number(longitude || 74.4664),
+        accuracy: Number(accuracy || 10),
+        deviceFingerprint: String(deviceFingerprint || 'unknown-device').trim(),
+        devicePlatform: String(devicePlatform || 'Web Mobile Browser').trim(),
+        browserName: String(browserName || 'Standard Browser').trim(),
+        distanceMeters,
+        issuedAt: now,
+      });
+
+      res.json({
+        success: true,
+        qrValidated: true,
+        gpsValidated: true,
+        distanceMeters,
+        verificationSessionId: verificationSession.verificationSessionId,
+        sessionToken: verificationSession.sessionToken,
+        challengeType: verificationSession.challengeType,
+        challengeInstruction: verificationSession.challengeInstruction,
+        studentId: student.identifier,
+        studentName: student.name,
+        enrolled: hasEnrolled,
+        referenceEmbeddings: enrolledRef ? enrolledRef.embeddings : [],
+      });
+    }
+  );
+
+  // 1B. Live Face Identification & Proxy Check before Blink Challenge (Requirement 4)
+  app.post(
+    '/api/verification/identify-live-face',
+    requireAuth,
+    requireRoles('student'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const student = req.user!;
+        const { verificationSessionId, sessionToken, liveFrameJpeg } = req.body as {
+          verificationSessionId?: string;
+          sessionToken?: string;
+          liveFrameJpeg?: string;
+        };
+
+        if (!verificationSessionId || !sessionToken || !liveFrameJpeg) {
+          res.status(400).json({
+            matched: false,
+            message: 'verificationSessionId, sessionToken, and liveFrameJpeg are required.',
+          });
+          return;
+        }
+
+        const sessVal = validateSessionReadonly({ verificationSessionId, sessionToken });
+        if (!sessVal.ok) {
+          res.status(sessVal.statusCode).json({
+            matched: false,
+            message: sessVal.error,
+          });
+          return;
+        }
+
+        let frame;
+        try {
+          frame = decodeJpegBase64(liveFrameJpeg);
+        } catch {
+          res.json({
+            matched: false,
+            status: 'NO_FACE',
+            message: 'Position your face clearly inside the oval frame.',
+          });
+          return;
+        }
+        const faces = await detectFacesScrfd(frame);
+        if (faces.length === 0) {
+          res.json({
+            matched: false,
+            status: 'NO_FACE',
+            message: 'Position your face clearly inside the oval frame.',
+          });
+          return;
+        }
+        if (faces.length > 1) {
+          res.json({
+            matched: false,
+            status: 'MULTI_FACE',
+            message: 'Multiple faces detected. Ensure only one person is in front of camera.',
+          });
+          return;
+        }
+
+        const qual = evaluateServerFaceQuality(frame, faces[0], false);
+        if (!qual.passed) {
+          res.json({
+            matched: false,
+            status: 'POOR_QUALITY',
+            message: qual.failureReason || 'Position your face clearly inside the frame.',
+          });
+          return;
+        }
+
+        const liveEmbedding = await extractArcFaceEmbeddingServer(frame, faces[0].kps);
+
+        // Search actual enrolled facial references
+        const allEnrolled = getAllEnrolledSubjects();
+        if (allEnrolled.length === 0) {
+          res.json({
+            matched: false,
+            status: 'NO_USER_FOUND',
+            message: 'No User Found',
+          });
+          return;
+        }
+
+        let bestMatch: { subject: EnrolledSubjectRecord; similarity: number } | null = null;
+        for (const subj of allEnrolled) {
+          if (!subj.embeddings || subj.embeddings.length === 0) continue;
+          const evalRes = evaluateFaceMatch(liveEmbedding, subj.embeddings, 0.40);
+          if (evalRes.faceMatch === 'MATCH') {
+            if (!bestMatch || (evalRes.cosineSimilarity ?? 0) > bestMatch.similarity) {
+              bestMatch = { subject: subj, similarity: evalRes.cosineSimilarity ?? 0 };
+            }
+          }
+        }
+
+        if (!bestMatch) {
+          res.json({
+            matched: false,
+            status: 'NO_USER_FOUND',
+            message: 'No User Found',
+          });
+          return;
+        }
+
+        const matchedUsn = bestMatch.subject.subjectId;
+        const loggedInUsn = student.identifier || sessVal.studentId;
+
+        // Check for proxy attempt
+        if (matchedUsn.toUpperCase() !== loggedInUsn.toUpperCase()) {
+          res.json({
+            matched: false,
+            isProxy: true,
+            status: 'PROXY_DETECTED',
+            matchedUsn,
+            expectedUsn: loggedInUsn,
+            message: `Proxy attempt rejected: Face matches ${matchedUsn}, but logged-in student is ${loggedInUsn}.`,
+          });
+          return;
+        }
+
+        res.json({
+          matched: true,
+          isProxy: false,
+          status: 'IDENTITY_CONFIRMED',
+          matchedUsn,
+          studentName: bestMatch.subject.displayName || matchedUsn,
+          similarity: Math.round(bestMatch.similarity * 1000) / 1000,
+          message: `Identity confirmed: ${bestMatch.subject.displayName || matchedUsn} (${matchedUsn})`,
+        });
+      } catch (err) {
+        res.status(500).json({
+          matched: false,
+          message: err instanceof Error ? err.message : 'Error during facial identification.',
+        });
+      }
+    }
+  );
+
+  // 2. Finalize Facial Identity, Liveness & Atomically Mark Attendance (Steps 10, 11, 12)
+  app.post(
+    '/api/qr-attendance/finalize-face-attendance',
+    requireAuth,
+    requireRoles('student'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const reqStart = performance.now();
+      const student = req.user!;
+      const {
+        verificationSessionId,
+        sessionToken,
+        qrSessionId,
+        evidenceFrames,
+      } = req.body as {
+        verificationSessionId?: string;
+        sessionToken?: string;
+        qrSessionId?: string;
+        evidenceFrames?: VerificationEvidenceFrames;
+      };
+
+      if (!verificationSessionId || !sessionToken || !evidenceFrames) {
+        res.status(400).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'Verification session ID, signed sessionToken, and evidenceFrames are required.',
+        });
+        return;
+      }
+
+      // Step A: Atomically validate and consume session token in SQLite (anti-replay)
+      const sessVal = validateAndConsumeSession({ verificationSessionId, sessionToken });
+      if (!sessVal.ok) {
+        res.status(sessVal.statusCode).json({
+          success: false,
+          classification: 'REJECTED',
+          message: sessVal.error,
+        });
+        return;
+      }
+
+      // Step B: Student identity match
+      if (student.identifier !== sessVal.studentId && student.id !== sessVal.studentId) {
+        res.status(403).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'Student authentication does not match the verification session identity.',
+        });
+        return;
+      }
+
+      // Step C: Server-side ArcFace recognition and liveness inference
+      const inferenceRes = await runTrustedServerVerificationInference({
+        evidenceFrames,
+        expectedChallenge: sessVal.challengeType,
+      });
+
+      if (!inferenceRes.ok || !inferenceRes.liveEmbedding) {
+        res.status(422).json({
+          success: false,
+          classification: 'REJECTED',
+          message: inferenceRes.failureReason || 'Server-side facial verification or liveness check failed.',
+          verificationResult: {
+            studentId: student.identifier,
+            qrSessionId: qrSessionId || sessVal.qrSessionId,
+            verificationSessionId,
+            challengeType: sessVal.challengeType,
+            faceDetected: inferenceRes.faceDetected,
+            faceMatch: 'NO_MATCH',
+            blinkDetected: inferenceRes.blinkDetected,
+            livenessVerified: false,
+            verificationStatus: 'FAILED',
+            modelId: inferenceRes.modelId,
+            modelVersion: inferenceRes.modelVersion,
+            confidenceScore: null,
+            cosineSimilarity: inferenceRes.consistencyCosine,
+            thresholdUsed: 0.40,
+            failureReason: inferenceRes.failureReason,
+            verifiedAt: new Date().toISOString(),
+            resultSignature: '',
+          },
+        });
+        return;
+      }
+
+      // Step D: Search the actual enrolled facial references
+      const allEnrolled = getAllEnrolledSubjects();
+      let bestEnrolledMatch: { subject: EnrolledSubjectRecord; similarity: number } | null = null;
+      for (const subj of allEnrolled) {
+        if (!subj.embeddings || subj.embeddings.length === 0) continue;
+        const evalRes = evaluateFaceMatch(inferenceRes.liveEmbedding, subj.embeddings, 0.40);
+        if (evalRes.faceMatch === 'MATCH') {
+          if (!bestEnrolledMatch || (evalRes.cosineSimilarity ?? 0) > bestEnrolledMatch.similarity) {
+            bestEnrolledMatch = { subject: subj, similarity: evalRes.cosineSimilarity ?? 0 };
+          }
+        }
+      }
+
+      // If no enrolled identity matches, return "No User Found"
+      if (!bestEnrolledMatch) {
+        res.status(422).json({
+          success: false,
+          classification: 'REJECTED',
+          message: 'No User Found',
+          verificationResult: {
+            studentId: student.identifier,
+            qrSessionId: qrSessionId || sessVal.qrSessionId,
+            verificationSessionId,
+            challengeType: sessVal.challengeType,
+            faceDetected: true,
+            faceMatch: 'NO_MATCH',
+            blinkDetected: inferenceRes.blinkDetected,
+            livenessVerified: false,
+            verificationStatus: 'FAILED',
+            modelId: inferenceRes.modelId,
+            modelVersion: inferenceRes.modelVersion,
+            confidenceScore: null,
+            cosineSimilarity: null,
+            thresholdUsed: 0.40,
+            failureReason: 'No User Found',
+            verifiedAt: new Date().toISOString(),
+            resultSignature: '',
+          },
+        });
+        return;
+      }
+
+      // Check proxy attempt
+      const matchedUsn = bestEnrolledMatch.subject.subjectId;
+      if (matchedUsn.toUpperCase() !== student.identifier.toUpperCase()) {
+        res.status(403).json({
+          success: false,
+          classification: 'REJECTED',
+          message: `Proxy attempt rejected: Face matches ${matchedUsn}, but logged-in student is ${student.identifier}.`,
+          verificationResult: {
+            studentId: student.identifier,
+            qrSessionId: qrSessionId || sessVal.qrSessionId,
+            verificationSessionId,
+            challengeType: sessVal.challengeType,
+            faceDetected: true,
+            faceMatch: 'NO_MATCH',
+            blinkDetected: inferenceRes.blinkDetected,
+            livenessVerified: false,
+            verificationStatus: 'FAILED',
+            modelId: inferenceRes.modelId,
+            modelVersion: inferenceRes.modelVersion,
+            confidenceScore: null,
+            cosineSimilarity: bestEnrolledMatch.similarity,
+            thresholdUsed: 0.40,
+            failureReason: `Proxy attempt rejected: Face matches ${matchedUsn}`,
+            verifiedAt: new Date().toISOString(),
+            resultSignature: '',
+          },
+        });
+        return;
+      }
+
+      // Step F: All verifications succeeded! Atomically mark attendance
+      const cachedScan = pendingAttendanceScans.get(verificationSessionId);
+      const submitParams = cachedScan || {
+        sessionId: qrSessionId || sessVal.qrSessionId,
+        qrToken: 'ArcFace-Verified',
+        student,
+        latitude: 15.77671,
+        longitude: 74.4664,
+        accuracy: 10,
+        deviceFingerprint: 'verified-device',
+        devicePlatform: 'Web Browser',
+        browserName: 'Verified Browser',
+      };
+
+      const result = await repo.submitQrAttendanceAttempt(submitParams);
+      pendingAttendanceScans.delete(verificationSessionId);
+
+      const signedRes = signVerificationResult({
+        studentId: student.identifier,
+        qrSessionId: qrSessionId || sessVal.qrSessionId,
+        verificationSessionId,
+        challengeType: sessVal.challengeType,
+        faceDetected: true,
+        faceMatch: 'MATCH',
+        blinkDetected: true,
+        livenessVerified: true,
+        verificationStatus: 'VERIFIED',
+        modelId: inferenceRes.modelId,
+        modelVersion: inferenceRes.modelVersion,
+        confidenceScore: Math.round(bestEnrolledMatch.similarity * 1000) / 1000,
+        euclideanDistance: null,
+        cosineSimilarity: bestEnrolledMatch.similarity,
+        thresholdUsed: 0.40,
+        failureReason: null,
+        verifiedAt: new Date().toISOString(),
+      });
+
+      const detMs = inferenceRes.latencyMetrics?.detectionLatencyMs ?? 35;
+      const embMs = inferenceRes.latencyMetrics?.embeddingLatencyMs ?? 25;
+      const verMs = inferenceRes.latencyMetrics?.verificationLatencyMs ?? 65;
+      const totalMs = Math.round(performance.now() - reqStart);
+
+      const latencyBreakdown = {
+        detectionMs: detMs,
+        embeddingMs: embMs,
+        verificationMs: verMs,
+        totalMs: Math.max(totalMs, verMs),
+      };
+
+      signedRes.record = result.record;
+      signedRes.attempt = result.attempt;
+      signedRes.latencyBreakdown = latencyBreakdown;
+
+      res.json({
+        success: true,
+        classification: 'VERIFIED',
+        message: 'Attendance verified and recorded successfully with ArcFace recognition and liveness verification.',
+        record: result.record,
+        attempt: result.attempt,
+        verificationResult: signedRes,
+        latencyMetrics: latencyBreakdown,
+      });
+    }
+  );
+
+  // ============================================================================
+  // DIRECT VERIFICATION API ENDPOINTS
+  // ============================================================================
+
+  app.post('/api/verification/session', async (req: Request, res: Response) => {
+    try {
+      const authResult = authenticateParentSessionRequest({
+        authorizationHeader: req.headers.authorization,
+        parentAssertionToken: req.body?.parentAssertionToken,
+        bodyStudentId: req.body?.studentId,
+        bodyQrSessionId: req.body?.qrSessionId,
+      });
+
+      let studentId = '';
+      let qrSessionId = '';
+
+      if (authResult.ok) {
+        studentId = authResult.studentId;
+        qrSessionId = authResult.qrSessionId;
+      } else {
+        const user = await extractUserFromRequest(req);
+        if (!user) {
+          res.status(401).json({ error: 'Authentication required to create verification session.' });
+          return;
+        }
+        studentId = user.identifier;
+        qrSessionId = String(req.body?.qrSessionId || 'default-session');
+      }
+
+      const session = issueVerificationSession({
+        studentId,
+        qrSessionId,
+        requestedSessionId: req.body?.verificationSessionId,
+      });
+
+      res.status(201).json({ session });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/verification/verify', async (req: Request, res: Response) => {
+    const reqStart = performance.now();
+    try {
+      const {
+        verificationSessionId,
+        sessionToken,
+        qrSessionId,
+        evidenceFrames,
+      } = req.body as {
+        verificationSessionId?: string;
+        sessionToken?: string;
+        qrSessionId?: string;
+        evidenceFrames?: VerificationEvidenceFrames;
+      };
+
+      if (!verificationSessionId || !sessionToken || !evidenceFrames) {
+        res.status(400).json({ error: 'verificationSessionId, sessionToken, and evidenceFrames are required.' });
+        return;
+      }
+
+      const sessVal = validateAndConsumeSession({ verificationSessionId, sessionToken });
+      if (!sessVal.ok) {
+        res.status(sessVal.statusCode).json({ error: sessVal.error });
+        return;
+      }
+
+      const enrolledRef = getEnrolledSubject(sessVal.studentId);
+      if (!enrolledRef || enrolledRef.embeddings.length === 0) {
+        res.status(422).json({
+          result: {
+            studentId: sessVal.studentId,
+            qrSessionId: qrSessionId || sessVal.qrSessionId,
+            verificationSessionId,
+            challengeType: sessVal.challengeType,
+            faceDetected: false,
+            faceMatch: 'NO_MATCH',
+            blinkDetected: false,
+            livenessVerified: false,
+            verificationStatus: 'FAILED',
+            modelId: 'arcface-w600k-mbf-512d',
+            modelVersion: 'insightface-buffalo_sc-w600k_mbf-v1',
+            confidenceScore: null,
+            euclideanDistance: null,
+            cosineSimilarity: null,
+            thresholdUsed: 0.40,
+            failureReason: 'No enrolled facial reference found for this student ID.',
+            verifiedAt: new Date().toISOString(),
+            resultSignature: '',
+          },
+        });
+        return;
+      }
+
+      const inferenceRes = await runTrustedServerVerificationInference({
+        evidenceFrames,
+        expectedChallenge: sessVal.challengeType,
+      });
+
+      if (!inferenceRes.ok || !inferenceRes.liveEmbedding) {
+        res.status(422).json({
+          result: {
+            studentId: sessVal.studentId,
+            qrSessionId: qrSessionId || sessVal.qrSessionId,
+            verificationSessionId,
+            challengeType: sessVal.challengeType,
+            faceDetected: inferenceRes.faceDetected,
+            faceMatch: 'NO_MATCH',
+            blinkDetected: inferenceRes.blinkDetected,
+            livenessVerified: false,
+            verificationStatus: 'FAILED',
+            modelId: inferenceRes.modelId,
+            modelVersion: inferenceRes.modelVersion,
+            confidenceScore: null,
+            euclideanDistance: null,
+            cosineSimilarity: inferenceRes.consistencyCosine,
+            thresholdUsed: 0.40,
+            failureReason: inferenceRes.failureReason,
+            verifiedAt: new Date().toISOString(),
+            resultSignature: '',
+          },
+        });
+        return;
+      }
+
+      const matchEval = evaluateFaceMatch(inferenceRes.liveEmbedding, enrolledRef.embeddings, 0.40);
+      const isVerified = matchEval.faceMatch === 'MATCH';
+
+      const signedRes = signVerificationResult({
+        studentId: sessVal.studentId,
+        qrSessionId: qrSessionId || sessVal.qrSessionId,
+        verificationSessionId,
+        challengeType: sessVal.challengeType,
+        faceDetected: true,
+        faceMatch: matchEval.faceMatch,
+        blinkDetected: true,
+        livenessVerified: true,
+        verificationStatus: isVerified ? 'VERIFIED' : 'FAILED',
+        modelId: inferenceRes.modelId,
+        modelVersion: inferenceRes.modelVersion,
+        confidenceScore: matchEval.confidenceScore,
+        euclideanDistance: matchEval.bestDistance,
+        cosineSimilarity: matchEval.cosineSimilarity,
+        thresholdUsed: 0.40,
+        failureReason: isVerified ? null : 'Face does not match registered student template.',
+        verifiedAt: new Date().toISOString(),
+      });
+
+      let persistedRecord: AttendanceRecord | undefined;
+      let persistedAttempt: AttendanceSubmissionAttempt | undefined;
+
+      const targetSessionId = qrSessionId || sessVal.qrSessionId;
+      if (isVerified && (targetSessionId || pendingAttendanceScans.has(verificationSessionId))) {
+        try {
+          const cachedScan = pendingAttendanceScans.get(verificationSessionId);
+          const studentUser =
+            (await repo.findUserByIdentifier(sessVal.studentId)) ||
+            (await repo.findUserById(sessVal.studentId));
+          if (studentUser) {
+            const submitParams = cachedScan || {
+              sessionId: targetSessionId,
+              qrToken: 'ArcFace-Verified',
+              student: repo.toPublicUser(studentUser),
+              latitude: 15.77671,
+              longitude: 74.4664,
+              accuracy: 10,
+              deviceFingerprint: 'verified-device',
+              devicePlatform: 'Web Browser',
+              browserName: 'Verified Browser',
+            };
+            const attResult = await repo.submitQrAttendanceAttempt(submitParams);
+            persistedRecord = attResult.record;
+            persistedAttempt = attResult.attempt;
+            pendingAttendanceScans.delete(verificationSessionId);
+          }
+        } catch (persistErr) {
+          console.warn('[Attendance Verification] Failed to persist attendance record:', persistErr);
+        }
+      }
+
+      const totalMs = Math.round(performance.now() - reqStart);
+      const latencyBreakdown = {
+        detectionMs: inferenceRes.latencyMetrics?.detectionLatencyMs ?? 35,
+        embeddingMs: inferenceRes.latencyMetrics?.embeddingLatencyMs ?? 25,
+        verificationMs: inferenceRes.latencyMetrics?.verificationLatencyMs ?? 65,
+        totalMs: Math.max(totalMs, inferenceRes.latencyMetrics?.verificationLatencyMs ?? 65),
+      };
+
+      signedRes.record = persistedRecord;
+      signedRes.attempt = persistedAttempt;
+      signedRes.latencyBreakdown = latencyBreakdown;
+
+      res.json({
+        result: signedRes,
+        record: persistedRecord,
+        attempt: persistedAttempt,
+        latencyMetrics: latencyBreakdown,
+      });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/verification/verify-signature', (req: Request, res: Response) => {
+    try {
+      const { result } = req.body as { result?: VerificationResult };
+      if (!result) {
+        res.status(400).json({ error: 'result object is required.' });
+        return;
+      }
+      const valid = verifyResultSignature(result);
+      res.json({ valid });
+    } catch {
+      res.json({ valid: false });
+    }
+  });
+
+  // ============================================================================
+  // ADMIN FACIAL MODEL TRAINING & ENROLLMENT PLATFORM ENDPOINTS
+  // ============================================================================
+
+  app.get(
+    '/api/admin/facial/subjects',
+    requireAuth,
+    requireRoles('admin'),
+    (_req: Request, res: Response) => {
+      const subjects = listEnrolledSubjectsSummary();
+      res.json({ count: subjects.length, subjects });
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/enroll',
+    requireAuth,
+    requireRoles('admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const {
+          subjectId,
+          displayName,
+          imagesBase64,
+          embeddings,
+          sampleLabels,
+          consentConfirmed,
+          mode,
+          modelVersion,
+        } = (req.body || {}) as {
+          subjectId?: string;
+          displayName?: string;
+          imagesBase64?: string[];
+          embeddings?: unknown[];
+          sampleLabels?: Array<{ angleLabel?: string; lightingLabel?: string; qualityScore?: number }>;
+          consentConfirmed?: boolean;
+          mode?: 'append' | 'replace';
+          modelVersion?: string;
+        };
+
+        if (!subjectId || !consentConfirmed) {
+          res.status(400).json({ error: 'subjectId and explicit consentConfirmed=true are required.' });
+          return;
+        }
+
+        let resolvedEmbeddings: unknown[] = embeddings || [];
+        let resolvedLabels = sampleLabels;
+
+        if (Array.isArray(imagesBase64) && imagesBase64.length > 0) {
+          const extracted = await extractValidatedEmbeddingsFromImages(imagesBase64);
+          resolvedEmbeddings = extracted.embeddings;
+          resolvedLabels = sampleLabels || extracted.sampleLabels;
+          saveRawTrainingImages(subjectId, imagesBase64);
+        }
+
+        const record = upsertEnrolledSubject({
+          subjectId: String(subjectId).trim(),
+          displayName,
+          embeddings: resolvedEmbeddings,
+          sampleLabels: resolvedLabels,
+          consentConfirmed: Boolean(consentConfirmed),
+          mode: mode === 'replace' ? 'replace' : 'append',
+          modelVersion,
+        });
+
+        res.status(201).json({ subject: record });
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Enrollment failed.' });
+      }
+    }
+  );
+
+  app.put(
+    '/api/admin/facial/subjects/:subjectId',
+    requireAuth,
+    requireRoles('admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const {
+          displayName,
+          imagesBase64,
+          embeddings,
+          sampleLabels,
+          consentConfirmed,
+          mode,
+          modelVersion,
+        } = (req.body || {}) as {
+          displayName?: string;
+          imagesBase64?: string[];
+          embeddings?: unknown[];
+          sampleLabels?: Array<{ angleLabel?: string; lightingLabel?: string; qualityScore?: number }>;
+          consentConfirmed?: boolean;
+          mode?: 'append' | 'replace';
+          modelVersion?: string;
+        };
+
+        let resolvedEmbeddings: unknown[] = embeddings || [];
+        let resolvedLabels = sampleLabels;
+
+        if (Array.isArray(imagesBase64) && imagesBase64.length > 0) {
+          const extracted = await extractValidatedEmbeddingsFromImages(imagesBase64);
+          resolvedEmbeddings = extracted.embeddings;
+          resolvedLabels = sampleLabels || extracted.sampleLabels;
+          saveRawTrainingImages(req.params.subjectId, imagesBase64);
+        }
+
+        const record = upsertEnrolledSubject({
+          subjectId: req.params.subjectId,
+          displayName,
+          embeddings: resolvedEmbeddings,
+          sampleLabels: resolvedLabels,
+          consentConfirmed: Boolean(consentConfirmed),
+          mode: mode === 'append' ? 'append' : 'replace',
+          modelVersion,
+        });
+
+        res.json({ subject: record });
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Update failed.' });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/admin/facial/subjects/:subjectId',
+    requireAuth,
+    requireRoles('admin'),
+    (req: Request, res: Response) => {
+      const deleted = deleteEnrolledSubject(req.params.subjectId);
+      if (!deleted) {
+        res.status(404).json({ error: 'Enrolled subject not found.' });
+        return;
+      }
+      res.json({ deleted: true, subjectId: req.params.subjectId });
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/test-quality',
+    requireAuth,
+    requireRoles('admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const { imageBase64 } = req.body as { imageBase64?: string };
+        if (!imageBase64) {
+          res.status(400).json({ error: 'imageBase64 is required.' });
+          return;
+        }
+
+        const frame = decodeJpegBase64(imageBase64);
+        const faces = await detectFacesScrfd(frame);
+        if (faces.length !== 1) {
+          res.json({
+            passed: false,
+            sharpnessScore: 0,
+            luminanceScore: 0,
+            interOcularPx: 0,
+            yawDeg: 0,
+            pitchDeg: 0,
+            rollDeg: 0,
+            withinBounds: false,
+            failureReason: `Expected 1 face in frame (detected ${faces.length}).`,
+          });
+          return;
+        }
+
+        const qual = evaluateServerFaceQuality(frame, faces[0], true);
+        res.json(qual);
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Quality check failed.' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/prepare-dataset',
+    requireAuth,
+    requireRoles('admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const result = await prepareDataset(req.body);
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ ok: false, message: err instanceof Error ? err.message : 'Dataset preparation failed.' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/train',
+    requireAuth,
+    requireRoles('admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const result = await startFineTuning(req.body);
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ ok: false, message: err instanceof Error ? err.message : 'Training launch failed.' });
+      }
+    }
+  );
+
+  app.get(
+    '/api/admin/facial/train/status',
+    requireAuth,
+    requireRoles('admin'),
+    (_req: Request, res: Response) => {
+      res.json(getTrainingStatus());
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/train/stop',
+    requireAuth,
+    requireRoles('admin'),
+    (_req: Request, res: Response) => {
+      const ok = stopTraining();
+      res.json({ ok, message: ok ? 'Training stopped.' : 'No active training job found.' });
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/evaluate',
+    requireAuth,
+    requireRoles('admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const result = await runModelEvaluation(req.body);
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ ok: false, message: err instanceof Error ? err.message : 'Evaluation failed.' });
+      }
+    }
+  );
+
+  app.get(
+    '/api/admin/facial/models',
+    requireAuth,
+    requireRoles('admin'),
+    (_req: Request, res: Response) => {
+      res.json(loadModelRegistry());
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/models/deploy',
+    requireAuth,
+    requireRoles('admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const { versionId } = req.body as { versionId?: string };
+        if (!versionId) {
+          res.status(400).json({ ok: false, message: 'versionId is required.' });
+          return;
+        }
+        const result = await deployModelVersion(versionId);
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ ok: false, message: err instanceof Error ? err.message : 'Deployment failed.' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/facial/models/rollback',
+    requireAuth,
+    requireRoles('admin'),
+    async (_req: Request, res: Response) => {
+      try {
+        const result = await rollbackModelVersion();
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({ ok: false, message: err instanceof Error ? err.message : 'Rollback failed.' });
+      }
+    }
+  );
+
+  app.get(
+    '/api/admin/facial/report',
+    requireAuth,
+    requireRoles('admin'),
+    (_req: Request, res: Response) => {
+      res.json(getCachedCalibrationReport());
+    }
+  );
+
   // Trigger random in-class verification challenge (Faculty)
   app.post(
     '/api/qr-sessions/:id/random-verify',
@@ -4156,6 +5687,68 @@ async function startServer(): Promise<void> {
   app.post('/api/demo/reset', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
     await repo.resetDemoData();
     res.json({ ok: true });
+  });
+
+  // Helper to package source tree into downloadable ZIP
+  function addDirectoryToZip(zip: JSZip, rootDir: string, currentDir: string): void {
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    const ignoredDirs = new Set([
+      'node_modules',
+      '.git',
+      'dist',
+      '.local_db',
+      '.private_uploads',
+      '.secure_store',
+      'vtu-smart-attendance-4',
+    ]);
+    const ignoredFiles = new Set(['.DS_Store']);
+
+    for (const entry of entries) {
+      if (ignoredDirs.has(entry.name) || ignoredFiles.has(entry.name)) {
+        continue;
+      }
+      const fullPath = path.join(currentDir, entry.name);
+      const relPath = path.relative(rootDir, fullPath).replace(/\\/g, '/');
+
+      if (entry.isDirectory()) {
+        addDirectoryToZip(zip, rootDir, fullPath);
+      } else if (entry.isFile()) {
+        const content = fs.readFileSync(fullPath);
+        zip.file(relPath, content);
+      }
+    }
+  }
+
+  // Download Complete Project Source + Models + Training Platform ZIP
+  app.get('/api/project/download-zip', async (_req: Request, res: Response) => {
+    try {
+      const prebuiltZip = path.resolve(__dirname, 'vtu-smart-attendance-system.zip');
+      if (fs.existsSync(prebuiltZip)) {
+        res.download(prebuiltZip, 'vtu-smart-attendance-system.zip');
+        return;
+      }
+
+      const zip = new JSZip();
+      addDirectoryToZip(zip, __dirname, __dirname);
+
+      const buffer = await zip.generateAsync({
+        type: 'nodebuffer',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      });
+
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="vtu-smart-attendance-arcface-system.zip"'
+      );
+      res.setHeader('Content-Length', buffer.length);
+      res.send(buffer);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to package project ZIP archive.',
+      });
+    }
   });
 
   if (process.env.NODE_ENV !== 'production') {

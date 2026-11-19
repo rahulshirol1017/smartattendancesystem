@@ -80,8 +80,8 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
   const [isScreenMasked, setIsScreenMasked] = useState<boolean>(false);
   const [flagSecureEnabled, setFlagSecureEnabled] = useState<boolean>(false);
 
-  // Timers (30s dynamic QR rotation for reliable scanning)
-  const QR_ROTATION_INTERVAL_SECONDS = 30;
+  // Timers (strictly 5 seconds dynamic QR rotation per VTU institutional requirement)
+  const QR_ROTATION_INTERVAL_SECONDS = 5;
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState<number>(QR_ROTATION_INTERVAL_SECONDS);
   const [sessionRemainingSeconds, setSessionRemainingSeconds] = useState<number>(0);
 

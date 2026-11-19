@@ -56,9 +56,11 @@ const UserSchema = new Schema(
       index: true,
     },
     isDemo: { type: Boolean, default: false, index: true },
+    tokenVersion: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
+UserSchema.index({ role: 1, sectionId: 1 });
 
 const SubjectSchema = new Schema(
   {
@@ -155,12 +157,15 @@ const ClassSessionSchema = new Schema(
   { timestamps: true }
 );
 ClassSessionSchema.index({ sectionId: 1, subjectId: 1, date: -1 });
+ClassSessionSchema.index({ facultyId: 1, date: -1 });
+ClassSessionSchema.index({ date: 1, status: 1 });
 
 const AttendanceRecordSchema = new Schema(
   {
     id: { type: String, required: true, unique: true, index: true },
     studentId: { type: String, required: true, index: true },
     classId: { type: String, required: true, index: true },
+    attendanceSessionId: { type: String, index: true },
     sectionId: { type: String, required: true, index: true },
     subjectId: { type: String, required: true, index: true },
     status: {
@@ -187,9 +192,13 @@ const AttendanceRecordSchema = new Schema(
   },
   { timestamps: true }
 );
-AttendanceRecordSchema.index({ studentId: 1, classId: 1 }, { unique: true });
+AttendanceRecordSchema.index({ studentId: 1, attendanceSessionId: 1 }, { unique: true });
+AttendanceRecordSchema.index({ studentId: 1, classId: 1 });
 AttendanceRecordSchema.index({ studentId: 1, subjectId: 1 });
 AttendanceRecordSchema.index({ sectionId: 1, subjectId: 1 });
+AttendanceRecordSchema.index({ studentId: 1, timestamp: -1 });
+AttendanceRecordSchema.index({ classId: 1, studentId: 1 });
+AttendanceRecordSchema.index({ subjectId: 1, status: 1 });
 
 const CorrectionRequestSchema = new Schema(
   {
@@ -413,6 +422,9 @@ const QRAttendanceSessionSchema = new Schema(
   },
   { timestamps: true }
 );
+QRAttendanceSessionSchema.index({ facultyId: 1, status: 1, createdAt: -1 });
+QRAttendanceSessionSchema.index({ sectionId: 1, status: 1 });
+QRAttendanceSessionSchema.index({ classId: 1, status: 1 });
 
 const StudentDeviceBindingSchema = new Schema(
   {
@@ -495,6 +507,10 @@ const AttendanceSubmissionAttemptSchema = new Schema(
   },
   { timestamps: true }
 );
+AttendanceSubmissionAttemptSchema.index({ sessionId: 1, studentId: 1 });
+AttendanceSubmissionAttemptSchema.index({ sessionId: 1, serverTimestamp: -1 });
+AttendanceSubmissionAttemptSchema.index({ studentIdentifier: 1, serverTimestamp: -1 });
+AttendanceSubmissionAttemptSchema.index({ deviceFingerprint: 1, serverTimestamp: -1 });
 
 const RandomInClassVerificationSchema = new Schema(
   {

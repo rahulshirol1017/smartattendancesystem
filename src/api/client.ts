@@ -18,6 +18,16 @@ import {
   TimetableEntry,
   UserProfile,
   VerificationClassification,
+  EnrolledSubjectRecord,
+  FaceQualityMetrics,
+  LivenessChallengeType,
+  ModelCalibrationReport,
+  ModelVersionRecord,
+  TrainingJobStatus,
+  VerificationEvidenceFrames,
+  VerificationRequestPayload,
+  VerificationResult,
+  VerificationSessionDescriptor,
 } from '../shared/types.ts';
 
 const TOKEN_STORAGE_KEY = 'vtu_auth_token_v3';
@@ -213,6 +223,32 @@ export const api = {
     setStoredToken(null);
   },
 
+  async forgotPassword(email: string): Promise<{ success: boolean; message: string }> {
+    return requestJson<{ success: boolean; message: string }>('/api/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  async verifyResetCode(email: string, code: string): Promise<{ success: boolean; message: string }> {
+    return requestJson<{ success: boolean; message: string }>('/api/auth/verify-reset-code', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    });
+  },
+
+  async resetPassword(payload: {
+    email: string;
+    code: string;
+    newPassword: string;
+    confirmPassword: string;
+  }): Promise<{ success: boolean; message: string }> {
+    return requestJson<{ success: boolean; message: string }>('/api/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   getBootstrap(): Promise<BootstrapPayload> {
     return requestJson<BootstrapPayload>('/api/bootstrap');
   },
@@ -322,6 +358,16 @@ export const api = {
   },
 
   // --- Admin: Students & Bulk CSV ---
+  getUsers(filter?: { role?: string }): Promise<{ users: UserProfile[] }> {
+    return this.getBootstrap().then((data) => {
+      let users = data.cohortUsers || [];
+      if (filter?.role) {
+        users = users.filter((u) => u.role === filter.role);
+      }
+      return { users };
+    });
+  },
+
   createStudent(payload: {
     name: string;
     identifier: string;
@@ -759,4 +805,315 @@ export const api = {
       }
     );
   },
+
+  // --------------------------------------------------------------------------
+  // QR + FACIAL RECOGNITION & ATTENDANCE
+  // --------------------------------------------------------------------------
+
+  validateQrScanBeforeFace(params: {
+    sessionId: string;
+    qrToken: string;
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+    deviceFingerprint?: string;
+    devicePlatform?: string;
+    browserName?: string;
+  }): Promise<{
+    success: boolean;
+    classification?: VerificationClassification;
+    message?: string;
+    qrValidated?: boolean;
+    gpsValidated?: boolean;
+    distanceMeters?: number;
+    verificationSessionId?: string;
+    sessionToken?: string;
+    challengeType?: LivenessChallengeType;
+    challengeInstruction?: string;
+    studentId?: string;
+    studentName?: string;
+    enrolled?: boolean;
+    referenceEmbeddings?: number[][];
+  }> {
+    return requestJson('/api/qr-attendance/validate-scan', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  finalizeFaceAttendance(
+    params: {
+      verificationSessionId: string;
+      sessionToken: string;
+      qrSessionId: string;
+      evidenceFrames: VerificationEvidenceFrames;
+    },
+    apiBaseUrl = ''
+  ): Promise<{
+    success: boolean;
+    classification: VerificationClassification;
+    message: string;
+    record?: AttendanceRecord;
+    attempt?: AttendanceSubmissionAttempt;
+    verificationResult: VerificationResult;
+    latencyMetrics?: {
+      detectionMs: number;
+      embeddingMs: number;
+      verificationMs: number;
+      totalMs: number;
+    };
+  }> {
+    return requestJson(`${apiBaseUrl}/api/qr-attendance/finalize-face-attendance`, {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  changePassword(params: {
+    currentPassword: string;
+    newPassword: string;
+    confirmPassword: string;
+  }): Promise<{ success: boolean; message: string }> {
+    return requestJson('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  identifyLiveFace(params: {
+    verificationSessionId: string;
+    sessionToken: string;
+    liveFrameJpeg: string;
+  }): Promise<{
+    matched: boolean;
+    isProxy?: boolean;
+    status?: string;
+    matchedUsn?: string;
+    expectedUsn?: string;
+    studentName?: string;
+    similarity?: number;
+    message: string;
+  }> {
+    return requestJson('/api/verification/identify-live-face', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  // --------------------------------------------------------------------------
+  // ADMIN FACIAL MODEL TRAINING PLATFORM
+  // --------------------------------------------------------------------------
+
+  getFacialSubjects(): Promise<{ count: number; subjects: EnrolledSubjectRecord[] }> {
+    return requestJson<{ count: number; subjects: EnrolledSubjectRecord[] }>(
+      '/api/admin/facial/subjects'
+    );
+  },
+
+  enrollFacialSubject(data: {
+    subjectId: string;
+    displayName?: string;
+    imagesBase64?: string[];
+    embeddings?: number[][];
+    sampleLabels?: Array<{ angleLabel?: string; lightingLabel?: string; qualityScore?: number }>;
+    consentConfirmed: boolean;
+    mode?: 'append' | 'replace';
+    modelVersion?: string;
+  }): Promise<{ subject: EnrolledSubjectRecord }> {
+    return requestJson<{ subject: EnrolledSubjectRecord }>('/api/admin/facial/enroll', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  updateFacialSubject(
+    subjectId: string,
+    data: {
+      displayName?: string;
+      imagesBase64?: string[];
+      sampleLabels?: Array<{ angleLabel?: string; lightingLabel?: string; qualityScore?: number }>;
+      consentConfirmed: boolean;
+      mode?: 'append' | 'replace';
+    }
+  ): Promise<{ subject: EnrolledSubjectRecord }> {
+    return requestJson<{ subject: EnrolledSubjectRecord }>(
+      `/api/admin/facial/subjects/${encodeURIComponent(subjectId)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }
+    );
+  },
+
+  deleteFacialSubject(subjectId: string): Promise<{ deleted: boolean; subjectId: string }> {
+    return requestJson<{ deleted: boolean; subjectId: string }>(
+      `/api/admin/facial/subjects/${encodeURIComponent(subjectId)}`,
+      {
+        method: 'DELETE',
+      }
+    );
+  },
+
+  testFaceImageQuality(imageBase64: string): Promise<FaceQualityMetrics> {
+    return requestJson<FaceQualityMetrics>('/api/admin/facial/test-quality', {
+      method: 'POST',
+      body: JSON.stringify({ imageBase64 }),
+    });
+  },
+
+  prepareDataset(options?: {
+    seed?: number;
+    minImagesPerPerson?: number;
+  }): Promise<{ ok: boolean; message: string; summary?: Record<string, unknown> }> {
+    return requestJson('/api/admin/facial/prepare-dataset', {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
+    });
+  },
+
+  startModelTraining(options?: {
+    epochs?: number;
+    batchSize?: number;
+    learningRate?: number;
+    seed?: number;
+  }): Promise<{ ok: boolean; message: string }> {
+    return requestJson('/api/admin/facial/train', {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
+    });
+  },
+
+  getModelTrainingStatus(): Promise<TrainingJobStatus> {
+    return requestJson<TrainingJobStatus>('/api/admin/facial/train/status');
+  },
+
+  stopModelTraining(): Promise<{ ok: boolean; message: string }> {
+    return requestJson('/api/admin/facial/train/stop', {
+      method: 'POST',
+    });
+  },
+
+  evaluateModel(params?: {
+    onnxPath?: string;
+    testDir?: string;
+  }): Promise<{ ok: boolean; report?: ModelCalibrationReport; message?: string }> {
+    return requestJson('/api/admin/facial/evaluate', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+  },
+
+  getModelRegistry(): Promise<{
+    activeVersionId: string;
+    previousActiveVersionId: string | null;
+    versions: ModelVersionRecord[];
+    lastUpdated: string;
+  }> {
+    return requestJson('/api/admin/facial/models');
+  },
+
+  deployModel(versionId: string): Promise<{
+    ok: boolean;
+    message: string;
+    activeVersion?: ModelVersionRecord;
+  }> {
+    return requestJson('/api/admin/facial/models/deploy', {
+      method: 'POST',
+      body: JSON.stringify({ versionId }),
+    });
+  },
+
+  rollbackModel(): Promise<{
+    ok: boolean;
+    message: string;
+    activeVersion?: ModelVersionRecord;
+  }> {
+    return requestJson('/api/admin/facial/models/rollback', {
+      method: 'POST',
+    });
+  },
+
+  getCachedCalibrationReport(): Promise<ModelCalibrationReport | null> {
+    return requestJson<ModelCalibrationReport | null>('/api/admin/facial/report');
+  },
 };
+
+export const verificationApi = {
+  async createSession(
+    params: {
+      studentId?: string;
+      qrSessionId?: string;
+      verificationSessionId?: string;
+      parentAssertionToken?: string;
+      parentAuthKey?: string;
+    },
+    apiBaseUrl = ''
+  ): Promise<VerificationSessionDescriptor> {
+    const data = await requestJson<{ session: VerificationSessionDescriptor }>(
+      `${apiBaseUrl}/api/verification/session`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          studentId: params.studentId,
+          qrSessionId: params.qrSessionId,
+          verificationSessionId: params.verificationSessionId,
+          parentAssertionToken: params.parentAssertionToken,
+        }),
+        headers: params.parentAuthKey ? { Authorization: `Bearer ${params.parentAuthKey}` } : {},
+      }
+    );
+    return data.session;
+  },
+
+  async verifyFace(
+    payload: VerificationRequestPayload,
+    apiBaseUrl = ''
+  ): Promise<VerificationResult> {
+    const data = await requestJson<{ result: VerificationResult }>(
+      `${apiBaseUrl}/api/verification/verify`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+    return data.result;
+  },
+
+  async identifyFace(
+    params: {
+      verificationSessionId: string;
+      sessionToken: string;
+      liveFrameJpeg: string;
+    },
+    apiBaseUrl = ''
+  ): Promise<{
+    matched: boolean;
+    isProxy?: boolean;
+    status?: string;
+    matchedUsn?: string;
+    expectedUsn?: string;
+    studentName?: string;
+    similarity?: number;
+    message: string;
+  }> {
+    return requestJson(`${apiBaseUrl}/api/verification/identify-live-face`, {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  async verifyResultSignature(
+    result: VerificationResult,
+    apiBaseUrl = ''
+  ): Promise<boolean> {
+    const data = await requestJson<{ valid: boolean }>(
+      `${apiBaseUrl}/api/verification/verify-signature`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ result }),
+      }
+    );
+    return data.valid;
+  },
+};
+

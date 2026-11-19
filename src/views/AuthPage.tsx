@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Eye, EyeOff } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Eye, EyeOff, KeyRound, Mail, ShieldCheck } from 'lucide-react';
 import { VtuEmblemLogo } from '../components/VtuEmblemLogo.tsx';
 import { AcademicSection } from '../shared/types.ts';
+import { api } from '../api/client.ts';
 
 interface AuthPageProps {
   initialMode?: 'login' | 'register';
@@ -29,12 +30,22 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   onLogin,
   onRegister,
 }) => {
-  const [mode, setMode] = useState<'login' | 'register'>(initialMode);
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot_password'>(initialMode);
   const [loginMethod, setLoginMethod] = useState<'id' | 'email'>('id');
 
   const [identifierOrEmail, setIdentifierOrEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+
+  // Forgot Password state
+  const [forgotStep, setForgotStep] = useState<'request_code' | 'verify_code' | 'set_new_password'>('request_code');
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotOtp, setForgotOtp] = useState('');
+  const [forgotNewPassword, setForgotNewPassword] = useState('');
+  const [forgotConfirmPassword, setForgotConfirmPassword] = useState('');
+  const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
+  const [showForgotConfirmPassword, setShowForgotConfirmPassword] = useState(false);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   const [regName, setRegName] = useState('');
   const [regUsn, setRegUsn] = useState('');
@@ -109,6 +120,87 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     }
   };
 
+  const handleRequestResetCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotEmail.trim()) {
+      setError('Please enter your university email address.');
+      return;
+    }
+    setError(null);
+    setSuccessMsg(null);
+    setBusy(true);
+    try {
+      const res = await api.forgotPassword(forgotEmail.trim());
+      setSuccessMsg(res.message);
+      setForgotStep('verify_code');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to request verification code.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleVerifyResetCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotOtp.trim()) {
+      setError('Please enter the 6-digit verification code.');
+      return;
+    }
+    setError(null);
+    setSuccessMsg(null);
+    setBusy(true);
+    try {
+      await api.verifyResetCode(forgotEmail.trim(), forgotOtp.trim());
+      setSuccessMsg('Verification code confirmed! Now enter your new password.');
+      setForgotStep('set_new_password');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid verification code.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotNewPassword || !forgotConfirmPassword) {
+      setError('Please enter and confirm your new password.');
+      return;
+    }
+    if (forgotNewPassword !== forgotConfirmPassword) {
+      setError('New password and confirm password do not match.');
+      return;
+    }
+    if (forgotNewPassword.length < 8) {
+      setError('Password must be at least 8 characters long.');
+      return;
+    }
+    setError(null);
+    setSuccessMsg(null);
+    setBusy(true);
+    try {
+      const res = await api.resetPassword({
+        email: forgotEmail.trim(),
+        code: forgotOtp.trim(),
+        newPassword: forgotNewPassword,
+        confirmPassword: forgotConfirmPassword,
+      });
+      setSuccessMsg(res.message);
+      setTimeout(() => {
+        setMode('login');
+        setIdentifierOrEmail(forgotEmail.trim());
+        setForgotStep('request_code');
+        setForgotOtp('');
+        setForgotNewPassword('');
+        setForgotConfirmPassword('');
+        setSuccessMsg('Password updated! You can now sign in with your new password.');
+      }, 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Password reset failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF3E3] text-[#241710]">
       <header className="h-16 bg-[#165B33] text-white border-b border-[#E3D2B4]">
@@ -155,7 +247,11 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           <div className="lg:col-span-7 p-6 sm:p-8 lg:p-10 space-y-6 bg-[#FFFDF8]">
             <div className="flex items-center justify-between border-b border-[#E3D2B4] pb-4">
               <h1 className="text-xl font-semibold text-[#165B33]">
-                {mode === 'login' ? 'Sign In' : 'Student Registration'}
+                {mode === 'login'
+                  ? 'Sign In'
+                  : mode === 'register'
+                  ? 'Student Registration'
+                  : 'Reset Password'}
               </h1>
 
               <button
@@ -163,10 +259,13 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 onClick={() => {
                   setMode((prev) => (prev === 'login' ? 'register' : 'login'));
                   setError(null);
+                  setSuccessMsg(null);
                 }}
                 className="text-xs font-semibold text-[#DF6A24] hover:underline whitespace-nowrap shrink-0"
               >
-                {mode === 'login' ? 'Create student account' : 'Back to sign in'}
+                {mode === 'login'
+                  ? 'Create student account'
+                  : 'Back to sign in'}
               </button>
             </div>
 
@@ -179,7 +278,218 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </div>
             )}
 
-            {mode === 'login' ? (
+            {successMsg && (
+              <div
+                role="status"
+                className="rounded border border-[#165B33]/30 bg-[#165B33]/10 px-3.5 py-2.5 text-xs text-[#165B33] font-medium flex items-center gap-2"
+              >
+                <CheckCircle2 className="w-4 h-4 text-[#165B33] shrink-0" />
+                <span>{successMsg}</span>
+              </div>
+            )}
+
+            {mode === 'forgot_password' ? (
+              <div className="space-y-5">
+                <div className="flex items-center justify-between text-xs border-b border-[#E3D2B4]/60 pb-3">
+                  <div
+                    className={`flex items-center gap-1.5 ${
+                      forgotStep === 'request_code'
+                        ? 'text-[#165B33] font-bold'
+                        : 'text-[#6B5A4C]'
+                    }`}
+                  >
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center border text-[11px] bg-white">
+                      1
+                    </span>
+                    <span>Enter Email</span>
+                  </div>
+                  <div className="h-px w-8 bg-[#E3D2B4]" />
+                  <div
+                    className={`flex items-center gap-1.5 ${
+                      forgotStep === 'verify_code'
+                        ? 'text-[#165B33] font-bold'
+                        : 'text-[#6B5A4C]'
+                    }`}
+                  >
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center border text-[11px] bg-white">
+                      2
+                    </span>
+                    <span>Verification Code</span>
+                  </div>
+                  <div className="h-px w-8 bg-[#E3D2B4]" />
+                  <div
+                    className={`flex items-center gap-1.5 ${
+                      forgotStep === 'set_new_password'
+                        ? 'text-[#165B33] font-bold'
+                        : 'text-[#6B5A4C]'
+                    }`}
+                  >
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center border text-[11px] bg-white">
+                      3
+                    </span>
+                    <span>New Password</span>
+                  </div>
+                </div>
+
+                {forgotStep === 'request_code' && (
+                  <form onSubmit={handleRequestResetCode} className="space-y-4">
+                    <p className="text-xs text-[#6B5A4C]">
+                      Enter your registered university email address. We will send a secure 6-digit verification code to reset your password.
+                    </p>
+                    <div>
+                      <label htmlFor="forgot-email" className="block text-xs font-medium text-[#241710] mb-1.5">
+                        University Email Address
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="forgot-email"
+                          type="email"
+                          required
+                          value={forgotEmail}
+                          onChange={(e) => setForgotEmail(e.target.value)}
+                          placeholder="e.g. 2vx24cb069@vtu.ac.in"
+                          className="w-full rounded border border-[#E3D2B4] bg-white pl-9 pr-3.5 py-2.5 text-sm text-[#241710] focus:border-[#165B33] focus:outline-none"
+                        />
+                        <Mail className="w-4 h-4 text-[#6B5A4C] absolute left-3 top-3" />
+                      </div>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="w-full rounded bg-[#165B33] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#104526] disabled:opacity-50 transition-colors"
+                    >
+                      {busy ? 'Sending code…' : 'Send Verification Code'}
+                    </button>
+                  </form>
+                )}
+
+                {forgotStep === 'verify_code' && (
+                  <form onSubmit={handleVerifyResetCode} className="space-y-4">
+                    <p className="text-xs text-[#6B5A4C]">
+                      A 6-digit verification code was sent to <strong className="text-[#241710]">{forgotEmail}</strong>. Please enter the code below (valid for 15 minutes).
+                    </p>
+                    <div>
+                      <label htmlFor="forgot-otp" className="block text-xs font-medium text-[#241710] mb-1.5">
+                        6-Digit Verification Code
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="forgot-otp"
+                          type="text"
+                          maxLength={6}
+                          required
+                          value={forgotOtp}
+                          onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, ''))}
+                          placeholder="123456"
+                          className="w-full tracking-widest text-center text-lg font-mono rounded border border-[#E3D2B4] bg-white px-3.5 py-2.5 text-[#241710] focus:border-[#165B33] focus:outline-none"
+                        />
+                        <ShieldCheck className="w-4 h-4 text-[#6B5A4C] absolute left-3 top-3.5" />
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setForgotStep('request_code');
+                          setError(null);
+                        }}
+                        className="rounded border border-[#E3D2B4] px-4 py-2.5 text-sm font-medium text-[#6B5A4C] hover:bg-[#FAF3E3] transition-colors"
+                      >
+                        Change Email
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={busy}
+                        className="flex-1 rounded bg-[#165B33] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#104526] disabled:opacity-50 transition-colors"
+                      >
+                        {busy ? 'Verifying…' : 'Verify Code'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {forgotStep === 'set_new_password' && (
+                  <form onSubmit={handleResetPasswordSubmit} className="space-y-4">
+                    <p className="text-xs text-[#6B5A4C]">
+                      Create a strong new password for your account (minimum 8 characters).
+                    </p>
+                    <div>
+                      <label htmlFor="forgot-new-password" className="block text-xs font-medium text-[#241710] mb-1.5">
+                        New Password
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="forgot-new-password"
+                          type={showForgotNewPassword ? 'text' : 'password'}
+                          required
+                          value={forgotNewPassword}
+                          onChange={(e) => setForgotNewPassword(e.target.value)}
+                          placeholder="Enter new password (min. 8 characters)"
+                          className="w-full rounded border border-[#E3D2B4] bg-white pl-9 pr-10 py-2.5 text-sm text-[#241710] focus:border-[#165B33] focus:outline-none"
+                        />
+                        <KeyRound className="w-4 h-4 text-[#6B5A4C] absolute left-3 top-3" />
+                        <button
+                          type="button"
+                          onClick={() => setShowForgotNewPassword((prev) => !prev)}
+                          aria-label={showForgotNewPassword ? 'Hide password' : 'Show password'}
+                          className="absolute inset-y-0 right-0 px-3 text-[#6B5A4C] hover:text-[#241710]"
+                        >
+                          {showForgotNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="forgot-confirm-password" className="block text-xs font-medium text-[#241710] mb-1.5">
+                        Confirm New Password
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="forgot-confirm-password"
+                          type={showForgotConfirmPassword ? 'text' : 'password'}
+                          required
+                          value={forgotConfirmPassword}
+                          onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                          placeholder="Re-enter new password"
+                          className="w-full rounded border border-[#E3D2B4] bg-white pl-9 pr-10 py-2.5 text-sm text-[#241710] focus:border-[#165B33] focus:outline-none"
+                        />
+                        <KeyRound className="w-4 h-4 text-[#6B5A4C] absolute left-3 top-3" />
+                        <button
+                          type="button"
+                          onClick={() => setShowForgotConfirmPassword((prev) => !prev)}
+                          aria-label={showForgotConfirmPassword ? 'Hide password' : 'Show password'}
+                          className="absolute inset-y-0 right-0 px-3 text-[#6B5A4C] hover:text-[#241710]"
+                        >
+                          {showForgotConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="w-full rounded bg-[#165B33] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#104526] disabled:opacity-50 transition-colors"
+                    >
+                      {busy ? 'Updating Password…' : 'Reset Password'}
+                    </button>
+                  </form>
+                )}
+
+                <div className="pt-2 text-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('login');
+                      setError(null);
+                      setSuccessMsg(null);
+                    }}
+                    className="text-xs font-medium text-[#DF6A24] hover:underline"
+                  >
+                    Return to Sign In
+                  </button>
+                </div>
+              </div>
+            ) : mode === 'login' ? (
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div className="space-y-1.5">
                   <span className="block text-xs font-medium text-[#6B5A4C]">
@@ -241,12 +551,29 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 </div>
 
                 <div>
-                  <label
-                    htmlFor="unified-login-password"
-                    className="block text-xs font-medium text-[#241710] mb-1.5"
-                  >
-                    Password
-                  </label>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label
+                      htmlFor="unified-login-password"
+                      className="block text-xs font-medium text-[#241710]"
+                    >
+                      Password
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode('forgot_password');
+                        setForgotStep('request_code');
+                        setError(null);
+                        setSuccessMsg(null);
+                        if (identifierOrEmail.includes('@')) {
+                          setForgotEmail(identifierOrEmail);
+                        }
+                      }}
+                      className="text-xs font-medium text-[#DF6A24] hover:underline"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
                   <div className="relative">
                     <input
                       id="unified-login-password"

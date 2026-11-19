@@ -27,10 +27,12 @@ COPY --from=builder /app/dist ./dist
 COPY server.ts ./
 COPY server ./server
 COPY src ./src
+COPY public ./public
+COPY .secure_store ./.secure_store
 COPY tsconfig.json ./
 
 # Create storage directories
-RUN mkdir -p .local_db .private_uploads
+RUN mkdir -p .local_db .private_uploads .secure_store
 
 EXPOSE 3000
 

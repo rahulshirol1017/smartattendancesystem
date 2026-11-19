@@ -8,7 +8,23 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: 3000
       - key: JWT_SECRET
         generateValue: true
       - key: MONGODB_URI
         sync: false
+      - key: BIOMETRIC_ENCRYPTION_KEY
+        generateValue: true
+      - key: VERIFICATION_SESSION_SECRET
+        generateValue: true
+      - key: PARENT_APP_AUTH_SECRET
+        generateValue: true
+      - key: ENROLLMENT_ADMIN_KEY
+        generateValue: true
+      - key: ARCFACE_COSINE_THRESHOLD
+        value: "0.40"
+      - key: APP_URL
+        sync: false
+      - key: PRIVATE_UPLOAD_DIR
+        value: ".private_uploads"

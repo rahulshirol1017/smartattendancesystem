@@ -56,7 +56,8 @@ export type AuditCategory =
   | 'TIMETABLE'
   | 'CLASS_SESSION'
   | 'ACCOUNT_ADMIN'
-  | 'POLICY';
+  | 'POLICY'
+  | 'ACCOUNT_SECURITY';
 
 export interface InstitutionalPolicy {
   id: string;
@@ -245,6 +246,18 @@ export interface UserProfile {
   unavailableSlots?: FacultyUnavailabilitySlot[];
   accountStatus: 'Active' | 'Inactive' | 'Suspended';
   isDemo: boolean;
+  isRegistered?: boolean;
+  tokenVersion?: number;
+}
+
+export interface IdentifyFaceResponse {
+  matched: boolean;
+  isProxy?: boolean;
+  matchedUsn?: string;
+  expectedUsn?: string;
+  studentName?: string;
+  similarity?: number;
+  message: string;
 }
 
 export interface SubjectItem {
@@ -322,6 +335,7 @@ export interface AttendanceRecord {
   id: string;
   studentId: string;
   classId: string;
+  attendanceSessionId?: string;
   sectionId: string; // Preserves historical section at the time of session!
   subjectId: string;
   status: AttendanceStatus;
@@ -481,7 +495,8 @@ export type NavigationSection =
   | 'admin-assignments'
   | 'admin-timetable'
   | 'admin-extra-classes'
-  | 'admin-audit-logs';
+  | 'admin-audit-logs'
+  | 'admin-facial-model';
 
 export interface SubjectAttendanceComputed {
   subject: SubjectItem;
@@ -538,3 +553,206 @@ export interface ConflictDetail {
   type: 'FACULTY_BUSY' | 'FACULTY_UNAVAILABLE' | 'SECTION_BUSY' | 'ROOM_BUSY' | 'ORIGINAL_CONDUCTED' | 'INVALID_TIME';
   message: string;
 }
+
+// ============================================================================
+// FACIAL BIOMETRIC RECOGNITION, LIVENESS & MODEL TRAINING TYPES
+// ============================================================================
+
+export type BlinkSequenceStage =
+  | 'WAITING_FACE'
+  | 'CALIBRATING_OPEN'
+  | 'EYES_OPEN_READY'
+  | 'EYES_CLOSED_DETECTED'
+  | 'BLINK_COMPLETED'
+  | 'FAILED';
+
+export type LivenessChallengeType =
+  | 'BLINK_AND_HEAD_LEFT'
+  | 'BLINK_AND_HEAD_RIGHT'
+  | 'BLINK_AND_NOD';
+
+export type RecognitionModelId = 'arcface-w600k-mbf-512d' | 'resnet34-128d';
+
+export interface FaceQualityMetrics {
+  passed: boolean;
+  sharpnessScore: number;
+  luminanceScore: number;
+  interOcularPx: number;
+  yawDeg: number;
+  pitchDeg: number;
+  rollDeg: number;
+  withinBounds: boolean;
+  failureReason: string | null;
+}
+
+export interface LivenessTelemetry {
+  blinkStage: BlinkSequenceStage;
+  blinkDetected: boolean;
+  blinkCount: number;
+  minEarObserved: number;
+  maxEarObserved: number;
+  avgOpenEar: number;
+  motionVarianceScore: number;
+  depthParallaxScore?: number;
+  challengeType?: LivenessChallengeType;
+  challengeCompleted?: boolean;
+  frameSamplesEvaluated: number;
+  sequenceTimestamps: {
+    openInitialAt?: number;
+    closedAt?: number;
+    challengeActionAt?: number;
+    reopenedAt?: number;
+  };
+}
+
+export interface VerificationSessionDescriptor {
+  verificationSessionId: string;
+  studentId: string;
+  qrSessionId: string;
+  challengeType: LivenessChallengeType;
+  challengeInstruction: string;
+  challengeNonce: string;
+  issuedAt: string;
+  expiresAt: string;
+  sessionToken: string;
+}
+
+export interface VerificationEvidenceFrames {
+  /** Cropped face/upper-head frame while looking straight ahead with eyes open */
+  baselineOpenJpeg: string;
+  /** Cropped frame captured at eye-closure peak during natural blink */
+  blinkClosedJpeg: string;
+  /** Cropped frame captured at randomized head movement peak (left/right/nod) */
+  challengeActionJpeg: string;
+  /** Cropped frame captured after completing blink + head action, looking forward with eyes open */
+  postChallengeOpenJpeg: string;
+}
+
+export interface VerificationRequestPayload {
+  verificationSessionId: string;
+  sessionToken: string;
+  qrSessionId?: string;
+  evidenceFrames: VerificationEvidenceFrames;
+}
+
+export interface VerificationResult {
+  studentId: string;
+  qrSessionId: string;
+  verificationSessionId: string;
+  challengeType: LivenessChallengeType;
+  faceDetected: boolean;
+  faceMatch: 'MATCH' | 'NO_MATCH';
+  blinkDetected: boolean;
+  livenessVerified: boolean;
+  verificationStatus: 'VERIFIED' | 'FAILED';
+  modelId: RecognitionModelId;
+  modelVersion: string;
+  confidenceScore: number | null;
+  euclideanDistance: number | null;
+  cosineSimilarity: number | null;
+  thresholdUsed: number;
+  failureReason: string | null;
+  verifiedAt: string;
+  resultSignature: string;
+  record?: AttendanceRecord;
+  attempt?: AttendanceSubmissionAttempt;
+  latencyBreakdown?: {
+    detectionMs: number;
+    embeddingMs: number;
+    verificationMs: number;
+    totalMs: number;
+  };
+}
+
+export interface EnrolledSampleMetadata {
+  sampleId: string;
+  angleLabel?: string;
+  lightingLabel?: string;
+  qualityScore?: number;
+  enrolledAt: string;
+}
+
+export interface EnrolledSubjectRecord {
+  subjectId: string;
+  displayName?: string;
+  modelId: RecognitionModelId;
+  modelVersion: string;
+  embeddingDim: number;
+  embeddings: number[][];
+  centroidEmbedding: number[];
+  samples: EnrolledSampleMetadata[];
+  consentConfirmed: boolean;
+  consentRecordedAt: string;
+  updatedAt: string;
+}
+
+export interface IdentificationCandidate {
+  subjectId: string;
+  displayName?: string;
+  cosineSimilarity: number;
+  euclideanDistance: number;
+}
+
+export type TrainingRunState = 'idle' | 'preparing' | 'training' | 'completed' | 'failed' | 'stopped';
+
+export interface TrainingEpochRecord {
+  epoch: number;
+  train_loss: number;
+  val_eer: number;
+  val_th: number;
+}
+
+export interface TrainingJobStatus {
+  state: TrainingRunState;
+  currentEpoch: number;
+  totalEpochs: number;
+  currentLoss: number | null;
+  bestValEer: number | null;
+  bestValThreshold: number | null;
+  device: string;
+  datasetIdentities: number;
+  datasetSamples: number;
+  logs: string[];
+  startedAt?: string;
+  completedAt?: string;
+  errorMessage?: string;
+}
+
+export interface ModelVersionRecord {
+  id: string;
+  versionName: string;
+  modelId: RecognitionModelId;
+  backboneArchitecture: string;
+  description: string;
+  status: 'active' | 'standby' | 'candidate';
+  trainedOn: string;
+  valEer: number;
+  recommendedThreshold: number;
+  onnxPath: string;
+  checkpointPath?: string;
+  createdAt: string;
+  isPretrainedBaseline: boolean;
+}
+
+export interface CalibrationMetricRow {
+  threshold: number;
+  far: number;
+  frr: number;
+  eer: number;
+}
+
+export interface ModelCalibrationReport {
+  evaluatedModelId: string;
+  evaluatedModelVersion: string;
+  testSampleCount: number;
+  subjectCount: number;
+  genuinePairsEvaluated: number;
+  impostorPairsEvaluated: number;
+  bestThreshold: number;
+  bestEer: number;
+  farAtRecommendedThreshold: number;
+  frrAtRecommendedThreshold: number;
+  curve: CalibrationMetricRow[];
+  calibratedAt: string;
+}
+

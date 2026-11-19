@@ -101,29 +101,45 @@ export class DataRepository {
         const parsed = JSON.parse(raw) as Partial<SeedDatabaseBundle>;
         if (
           parsed &&
-          parsed.schemaVersion === CURRENT_SEED_SCHEMA_VERSION &&
           Array.isArray(parsed.sections) &&
           Array.isArray(parsed.facultyAssignments) &&
-          Array.isArray(parsed.users) &&
-          Array.isArray(parsed.qrSessions) &&
-          Array.isArray(parsed.deviceBindings)
+          Array.isArray(parsed.users)
         ) {
-          this.state = parsed as SeedDatabaseBundle;
+          const fresh = buildInitialSeedData();
+          // Non-destructive preservation of all records, classes, and sessions
+          const records = Array.isArray(parsed.records)
+            ? parsed.records.map((r: AttendanceRecord) => ({
+                ...r,
+                attendanceSessionId: r.attendanceSessionId || r.classId,
+              }))
+            : fresh.records;
+
+          this.state = {
+            schemaVersion: CURRENT_SEED_SCHEMA_VERSION,
+            policy: parsed.policy || fresh.policy,
+            sections: Array.isArray(parsed.sections) && parsed.sections.length > 0 ? parsed.sections : fresh.sections,
+            users: Array.isArray(parsed.users) && parsed.users.length > 0 ? parsed.users : fresh.users,
+            subjects: Array.isArray(parsed.subjects) && parsed.subjects.length > 0 ? parsed.subjects : fresh.subjects,
+            facultyAssignments:
+              Array.isArray(parsed.facultyAssignments) && parsed.facultyAssignments.length > 0
+                ? parsed.facultyAssignments
+                : fresh.facultyAssignments,
+            classes: Array.isArray(parsed.classes) ? parsed.classes : fresh.classes,
+            records,
+            corrections: Array.isArray(parsed.corrections) ? parsed.corrections : fresh.corrections,
+            auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : fresh.auditLogs,
+            timetable: Array.isArray(parsed.timetable) ? parsed.timetable : fresh.timetable,
+            notifications: Array.isArray(parsed.notifications) ? parsed.notifications : fresh.notifications,
+            qrSessions: Array.isArray(parsed.qrSessions) ? parsed.qrSessions : fresh.qrSessions,
+            deviceBindings: Array.isArray(parsed.deviceBindings) ? parsed.deviceBindings : fresh.deviceBindings,
+            attendanceAttempts: Array.isArray(parsed.attendanceAttempts) ? parsed.attendanceAttempts : fresh.attendanceAttempts,
+            randomVerifications: Array.isArray(parsed.randomVerifications) ? parsed.randomVerifications : fresh.randomVerifications,
+          };
+          this.persistLocal();
           return;
         }
-        // Upgrade older store while preserving any registered live non-demo accounts
-        const liveUsers = Array.isArray(parsed?.users)
-          ? (parsed.users as StoredUser[]).filter((u) => !u.isDemo)
-          : [];
-        const fresh = buildInitialSeedData();
-        this.state = {
-          ...fresh,
-          users: [...fresh.users, ...liveUsers],
-        };
-        this.persistLocal();
-        return;
       } catch {
-        // Re-initialize on corrupt JSON
+        // Fall back to seed on corrupt JSON
       }
     }
     this.state = buildInitialSeedData();
@@ -141,7 +157,23 @@ export class DataRepository {
 
   private async seedMongoIfEmpty(): Promise<void> {
     const existingSections = await AcademicSectionModel.countDocuments();
-    if (existingSections > 0) return;
+    if (existingSections > 0) {
+      try {
+        await AttendanceRecordModel.collection.dropIndex('studentId_1_classId_1');
+      } catch {
+        // index already dropped or not unique
+      }
+      try {
+        await AttendanceRecordModel.updateMany(
+          { attendanceSessionId: { $exists: false } },
+          [{ $set: { attendanceSessionId: '$classId' } }]
+        );
+        await AttendanceRecordModel.syncIndexes();
+      } catch {
+        // Non-fatal index sync
+      }
+      return;
+    }
     const initial = buildInitialSeedData();
     await PolicyModel.deleteMany({});
     await PolicyModel.create(initial.policy);
@@ -331,6 +363,17 @@ export class DataRepository {
     return this.state.users.find((u) => u.id === id) || null;
   }
 
+  public async findUserByIdentifier(identifier: string): Promise<StoredUser | null> {
+    const trimmed = identifier.trim().toLowerCase();
+    if (this.mode === 'mongodb') {
+      const doc = await UserModel.findOne({
+        identifier: new RegExp(`^${identifier.trim()}$`, 'i'),
+      }).lean();
+      return (doc as unknown as StoredUser) || null;
+    }
+    return this.state.users.find((u) => u.identifier.toLowerCase() === trimmed) || null;
+  }
+
   public async listDemoPersonas(): Promise<UserProfile[]> {
     if (this.mode === 'mongodb') {
       const docs = await UserModel.find({ isDemo: true }).lean();
@@ -387,6 +430,11 @@ export class DataRepository {
     return this.toPublicUser(this.state.users[idx]);
   }
 
+  public async updateUserPassword(userId: string, newPasswordHash: string): Promise<boolean> {
+    const updated = await this.updateUser(userId, { passwordHash: newPasswordHash });
+    return Boolean(updated);
+  }
+
   // --- Policy ---
 
   public async getPolicy(): Promise<InstitutionalPolicy> {
@@ -394,14 +442,16 @@ export class DataRepository {
       const doc = await PolicyModel.findOne({ id: 'policy-default' }).lean();
       if (doc) {
         const p = doc as unknown as InstitutionalPolicy;
-        p.teacherHostRadiusMeters = Math.max(50, p.teacherHostRadiusMeters || 50);
-        p.qrRefreshSeconds = Math.max(30, p.qrRefreshSeconds || 30);
+        p.teacherHostRadiusMeters = p.teacherHostRadiusMeters ? Math.max(10, Math.min(50, p.teacherHostRadiusMeters)) : 15;
+        p.qrRefreshSeconds = 5;
         p.enforceDeviceRegistration = false;
         return p;
       }
     }
-    this.state.policy.teacherHostRadiusMeters = Math.max(50, this.state.policy.teacherHostRadiusMeters || 50);
-    this.state.policy.qrRefreshSeconds = Math.max(30, this.state.policy.qrRefreshSeconds || 30);
+    this.state.policy.teacherHostRadiusMeters = this.state.policy.teacherHostRadiusMeters
+      ? Math.max(10, Math.min(50, this.state.policy.teacherHostRadiusMeters))
+      : 15;
+    this.state.policy.qrRefreshSeconds = 5;
     this.state.policy.enforceDeviceRegistration = false;
     return this.state.policy;
   }
@@ -662,12 +712,115 @@ export class DataRepository {
     return this.state.classes[idx];
   }
 
-  public async getRecordsForStudent(studentId: string): Promise<AttendanceRecord[]> {
+  public async getRecordsForStudent(studentIdOrIdentifier: string): Promise<AttendanceRecord[]> {
+    const user =
+      (await this.findUserById(studentIdOrIdentifier)) ||
+      (await this.findUserByIdentifier(studentIdOrIdentifier));
+    const ids = new Set<string>([studentIdOrIdentifier]);
+    if (user) {
+      ids.add(user.id);
+      ids.add(user.identifier);
+    }
+    const idArray = Array.from(ids);
+
     if (this.mode === 'mongodb') {
-      const docs = await AttendanceRecordModel.find({ studentId }).lean();
+      const docs = await AttendanceRecordModel.find({ studentId: { $in: idArray } })
+        .sort({ timestamp: -1 })
+        .lean();
       return docs as unknown as AttendanceRecord[];
     }
-    return this.state.records.filter((r) => r.studentId === studentId);
+    return this.state.records
+      .filter((r) => ids.has(r.studentId))
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }
+
+  public async getRecordsForStudentPaginated(
+    studentIdOrIdentifier: string,
+    page = 1,
+    limit = 50
+  ): Promise<{
+    records: AttendanceRecord[];
+    total: number;
+    page: number;
+    totalPages: number;
+  }> {
+    const all = await this.getRecordsForStudent(studentIdOrIdentifier);
+    const total = all.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const validPage = Math.max(1, Math.min(page, totalPages));
+    const start = (validPage - 1) * limit;
+    const records = all.slice(start, start + limit);
+    return { records, total, page: validPage, totalPages };
+  }
+
+  public async calculateStudentAttendanceStats(studentIdOrIdentifier: string): Promise<{
+    overallPercentage: number;
+    totalClasses: number;
+    attendedClasses: number;
+    subjectStats: Array<{
+      subjectId: string;
+      subjectCode: string;
+      subjectName: string;
+      attended: number;
+      conducted: number;
+      percentage: number;
+      eligible: boolean;
+    }>;
+  }> {
+    const records = await this.getRecordsForStudent(studentIdOrIdentifier);
+    const subjects = await this.getSubjects();
+    const policy = await this.getPolicy();
+    const minPct = policy.defaultMinimumPercentage || 75;
+
+    const subjectMap = new Map<string, { subjectCode: string; subjectName: string; attended: number; conducted: number }>();
+    for (const sub of subjects) {
+      subjectMap.set(sub.id, {
+        subjectCode: sub.code,
+        subjectName: sub.name,
+        attended: 0,
+        conducted: 0,
+      });
+    }
+
+    let totalAttended = 0;
+    let totalConducted = 0;
+
+    for (const rec of records) {
+      let entry = subjectMap.get(rec.subjectId);
+      if (!entry) {
+        entry = { subjectCode: rec.subjectId, subjectName: rec.subjectId, attended: 0, conducted: 0 };
+        subjectMap.set(rec.subjectId, entry);
+      }
+      entry.conducted++;
+      totalConducted++;
+      if (rec.effectivePresent || rec.status === 'Present') {
+        entry.attended++;
+        totalAttended++;
+      }
+    }
+
+    const overallPercentage = totalConducted > 0 ? Math.round((totalAttended / totalConducted) * 1000) / 10 : 100;
+    const subjectStats = Array.from(subjectMap.entries())
+      .filter(([, s]) => s.conducted > 0)
+      .map(([subjId, s]) => {
+        const pct = s.conducted > 0 ? Math.round((s.attended / s.conducted) * 1000) / 10 : 100;
+        return {
+          subjectId: subjId,
+          subjectCode: s.subjectCode,
+          subjectName: s.subjectName,
+          attended: s.attended,
+          conducted: s.conducted,
+          percentage: pct,
+          eligible: pct >= minPct,
+        };
+      });
+
+    return {
+      overallPercentage,
+      totalClasses: totalConducted,
+      attendedClasses: totalAttended,
+      subjectStats,
+    };
   }
 
   public async getAllRecords(): Promise<AttendanceRecord[]> {
@@ -723,12 +876,13 @@ export class DataRepository {
     }
 
     for (const nr of newRecords) {
+      const sessId = nr.attendanceSessionId || nr.classId;
       const dup = this.state.records.find(
-        (r) => r.studentId === nr.studentId && r.classId === nr.classId
+        (r) => r.studentId === nr.studentId && (r.attendanceSessionId || r.classId) === sessId
       );
       if (dup) {
         throw new Error(
-          `Duplicate attendance entry blocked for student ${nr.studentId} in session ${nr.classId}.`
+          `Duplicate attendance entry blocked for student ${nr.studentId} in session ${sessId}.`
         );
       }
     }
@@ -757,12 +911,13 @@ export class DataRepository {
       return;
     }
     for (const nr of newRecords) {
+      const sessId = nr.attendanceSessionId || nr.classId;
       const dup = this.state.records.find(
-        (r) => r.studentId === nr.studentId && r.classId === nr.classId
+        (r) => r.studentId === nr.studentId && (r.attendanceSessionId || r.classId) === sessId
       );
       if (dup) {
         throw new Error(
-          `Duplicate attendance entry for student ${nr.studentId} in class ${nr.classId}`
+          `Duplicate attendance entry for student ${nr.studentId} in session ${sessId}`
         );
       }
     }
@@ -772,15 +927,17 @@ export class DataRepository {
   }
 
   public async insertAttendanceRecord(record: AttendanceRecord): Promise<AttendanceRecord> {
+    const sessId = record.attendanceSessionId || record.classId;
+    record.attendanceSessionId = sessId;
     if (this.mode === 'mongodb') {
       await AttendanceRecordModel.create(record);
       return record;
     }
     const dup = this.state.records.find(
-      (r) => r.studentId === record.studentId && r.classId === record.classId
+      (r) => r.studentId === record.studentId && (r.attendanceSessionId || r.classId) === sessId
     );
     if (dup) {
-      throw new Error(`Duplicate attendance entry for student ${record.studentId} in class ${record.classId}`);
+      throw new Error(`Duplicate attendance entry for student ${record.studentId} in session ${sessId}`);
     }
     this.state.records.push(record);
     this.persistLocal();
@@ -1652,29 +1809,34 @@ export class DataRepository {
     // 8. Record Attendance atomically if VERIFIED
     let createdRecord: AttendanceRecord | undefined;
     if (classification === 'VERIFIED') {
-      // Find today's class session or create an ad-hoc session
-      let targetClassSession = (await this.getAllSessions()).find(
-        (c) =>
-          c.sectionId === session.sectionId &&
-          c.subjectId === session.subjectId &&
-          c.date === session.date &&
-          c.approvalStatus === 'Approved'
-      );
+      // Find session-specific or matching class session
+      let targetClassSession: ClassSession | undefined;
+      if (session.classId) {
+        targetClassSession = (await this.getClassById(session.classId)) || undefined;
+      }
+      if (!targetClassSession) {
+        targetClassSession = (await this.getAllSessions()).find(
+          (c) =>
+            c.originalSessionId === session.id ||
+            c.id === `cls-${session.sectionId}-${session.subjectCode.toLowerCase()}-${session.id}`
+        );
+      }
 
       if (!targetClassSession) {
         targetClassSession = await this.createClassSession({
-          id: `cls-${session.sectionId}-${session.subjectCode.toLowerCase()}-${now}`,
+          id: `cls-${session.sectionId}-${session.subjectCode.toLowerCase()}-${session.id}`,
+          originalSessionId: session.id,
           sectionId: session.sectionId,
           sectionDisplayName: session.sectionDisplayName,
           subjectId: session.subjectId,
           subjectCode: session.subjectCode,
           subjectName: session.subjectName,
           date: session.date,
-          period: 'Dynamic QR',
+          period: session.startTime ? `Lecture (${session.startTime})` : 'Dynamic QR',
           startTime: session.startTime,
           endTime: session.endTime,
           durationHours: 1,
-          topic: `${session.subjectName} (QR Attendance Session)`,
+          topic: `${session.subjectName} (${session.startTime || 'QR Lecture'})`,
           sessionType: 'Regular',
           status: 'Conducted',
           scheduledFacultyId: session.facultyId,
@@ -1690,18 +1852,19 @@ export class DataRepository {
         });
       }
 
-      // Check existing record again inside the lock
+      // Check existing record for this attendance session inside the lock
       const existingRecord = (await this.getRecordsForStudent(params.student.id)).find(
-        (r) => r.classId === targetClassSession!.id
+        (r) => (r.attendanceSessionId || r.classId) === session.id
       );
 
       if (existingRecord) {
         createdRecord = existingRecord;
       } else {
         const newRecord: AttendanceRecord = {
-          id: `rec-qr-${params.student.id}-${targetClassSession.id}`,
+          id: `rec-qr-${params.student.id}-${session.id}`,
           studentId: params.student.id,
           classId: targetClassSession.id,
+          attendanceSessionId: session.id,
           sectionId: session.sectionId,
           subjectId: session.subjectId,
           status: 'Present',
@@ -1719,7 +1882,7 @@ export class DataRepository {
         } catch (dupErr) {
           // Handled duplicate key safely
           const refetched = (await this.getRecordsForStudent(params.student.id)).find(
-            (r) => r.classId === targetClassSession!.id
+            (r) => (r.attendanceSessionId || r.classId) === session.id
           );
           createdRecord = refetched || newRecord;
         }

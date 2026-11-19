@@ -47,6 +47,7 @@ const FACULTY_NAV_ORDER: NavigationSection[] = [
 const ADMIN_NAV_ORDER: NavigationSection[] = [
   'dashboard',
   'admin-attendance-monitoring',
+  'admin-facial-model',
   'admin-students',
   'admin-faculty',
   'admin-sections',
@@ -98,6 +99,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           return 'Dashboard';
         case 'admin-attendance-monitoring':
           return 'Live Monitoring';
+        case 'admin-facial-model':
+          return 'Facial AI Models';
         case 'admin-students':
           return 'Students';
         case 'admin-faculty':

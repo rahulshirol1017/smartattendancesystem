@@ -1,0 +1,21 @@
+{
+  "activeVersionId": "arcface-v1-official-webface600k",
+  "previousActiveVersionId": null,
+  "versions": [
+    {
+      "id": "arcface-v1-official-webface600k",
+      "versionName": "v1.0 (Official WebFace600K)",
+      "modelId": "arcface-w600k-mbf-512d",
+      "backboneArchitecture": "InsightFace MobileFaceNet (512-D L2)",
+      "description": "Official pretrained InsightFace MobileFaceNet trained with ArcFace Additive Angular Margin Loss on WebFace600K (~600K identities). High generalization baseline.",
+      "status": "active",
+      "trainedOn": "WebFace600K (~4.2M images, 600K identities)",
+      "valEer": 0.0125,
+      "recommendedThreshold": 0.4,
+      "onnxPath": "public/models/arcface_w600k_mbf.onnx",
+      "createdAt": "2026-11-12T00:00:00.000Z",
+      "isPretrainedBaseline": true
+    }
+  ],
+  "lastUpdated": "2026-11-14T14:11:14.531Z"
+}

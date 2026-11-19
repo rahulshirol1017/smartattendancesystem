@@ -1,0 +1,834 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { CheckCircle2, X, XCircle } from 'lucide-react';
+import { api, verificationApi } from '../api/client.ts';
+import {
+  BlinkLivenessTracker,
+  Point2D,
+  TrackedFaceFrame,
+  captureEvidenceFrameJpeg,
+  loadPretrainedFaceModels,
+  measureFrameLuminance,
+  startFrontCamera,
+  stopCameraStream,
+  trackFaceWithLandmarker,
+} from '../facial-verification/index.ts';
+import {
+  LivenessChallengeType,
+  VerificationEvidenceFrames,
+  VerificationResult,
+} from '../shared/types.ts';
+
+export interface FacialVerificationProps {
+  /** Student / subject display ID from authenticated parent VTU Smart Attendance app */
+  studentId?: string;
+  /** Unique single-use verification session ID issued by POST /api/verification/session */
+  verificationSessionId: string;
+  /** Server-signed HMAC token from POST /api/verification/session (required for live verification) */
+  sessionToken?: string;
+  /** Parent QR attendance session identifier */
+  qrSessionId?: string;
+  /** Server-randomized liveness challenge bound to sessionToken */
+  challengeType?: LivenessChallengeType;
+  /** Server-supplied prompt instruction for the randomized challenge */
+  challengeInstruction?: string;
+  /** Optional backend base URL (defaults to same origin) */
+  apiBaseUrl?: string;
+  /** Controls visibility; camera starts automatically when true and stops on false */
+  isOpen?: boolean;
+  /** Called immediately once verification succeeds or fails; camera is stopped beforehand */
+  onComplete: (result: VerificationResult) => void;
+  /** Optional cancel callback */
+  onCancel?: () => void;
+}
+
+type VerifierUiState =
+  | { phase: 'initializing'; message: string }
+  | { phase: 'position'; message: string }
+  | { phase: 'detected'; message: string }
+  | { phase: 'blink'; message: string }
+  | { phase: 'verifying'; message: string }
+  | { phase: 'success'; message: string }
+  | { phase: 'failure'; message: string };
+
+interface TrackedOvalRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+const CHALLENGE_TIMEOUT_MS = 22000;
+const TRACKING_INTERVAL_MS = 33; // ~30 FPS real-time MediaPipe tracking
+const DEFAULT_THRESHOLD = 0.4;
+const ACTIVE_MODEL_ID = 'arcface-w600k-mbf-512d' as const;
+const ACTIVE_MODEL_VERSION = 'insightface-buffalo_sc-w600k_mbf-v1';
+
+function clamp(val: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, val));
+}
+
+function mapVideoPointToContainer(
+  pt: Point2D,
+  vw: number,
+  vh: number,
+  cw: number,
+  ch: number
+): Point2D {
+  const scale = Math.min(cw / vw, ch / vh);
+  const renderedW = vw * scale;
+  const renderedH = vh * scale;
+  const offsetX = (cw - renderedW) / 2;
+  const offsetY = (ch - renderedH) / 2;
+  return {
+    // Horizontally mirrored to accurately track CSS -scale-x-100 front camera
+    x: offsetX + (vw - pt.x) * scale,
+    y: offsetY + pt.y * scale,
+  };
+}
+
+export const FacialVerification: React.FC<FacialVerificationProps> = ({
+  studentId = '',
+  verificationSessionId,
+  sessionToken,
+  qrSessionId = '',
+  challengeType = 'BLINK_AND_HEAD_LEFT',
+  apiBaseUrl = '',
+  isOpen = true,
+  onComplete,
+  onCancel,
+}) => {
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const scratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const lastFrameTimeRef = useRef<number>(0);
+  const lastMpTimestampRef = useRef<number>(0);
+  const blinkTrackerRef = useRef<BlinkLivenessTracker>(new BlinkLivenessTracker());
+  const finishedRef = useRef<boolean>(false);
+  const multiFaceCountRef = useRef<number>(0);
+  const challengeStartedAtRef = useRef<number | null>(null);
+
+  const capturedFramesRef = useRef<Partial<VerificationEvidenceFrames>>({});
+  const smoothedRectRef = useRef<TrackedOvalRect | null>(null);
+  const identityCheckedRef = useRef<boolean>(false);
+  const identityCheckingRef = useRef<boolean>(false);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0,
+  });
+  const [trackedOval, setTrackedOval] = useState<TrackedOvalRect | null>(null);
+
+  const latestPropsRef = useRef({
+    studentId,
+    verificationSessionId,
+    sessionToken,
+    qrSessionId,
+    challengeType,
+    apiBaseUrl,
+    onComplete,
+  });
+  latestPropsRef.current = {
+    studentId,
+    verificationSessionId,
+    sessionToken,
+    qrSessionId,
+    challengeType,
+    apiBaseUrl,
+    onComplete,
+  };
+
+  const [uiState, setUiState] = useState<VerifierUiState>({
+    phase: 'initializing',
+    message: 'Position your face inside the frame.',
+  });
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      setViewportSize({
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+    };
+    updateSize();
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const drawLandmarks = useCallback((detected: TrackedFaceFrame | null) => {
+    const canvas = overlayCanvasRef.current;
+    const video = videoRef.current;
+    const viewport = viewportRef.current;
+    if (!canvas || !viewport) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const cw = viewport.clientWidth;
+    const ch = viewport.clientHeight;
+    if (!cw || !ch) return;
+
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw;
+      canvas.height = ch;
+    }
+
+    ctx.clearRect(0, 0, cw, ch);
+
+    if (!detected || !video || !video.videoWidth || !video.videoHeight) {
+      return;
+    }
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+
+    ctx.fillStyle = 'rgba(250, 243, 227, 0.68)';
+    for (const pt of detected.allPoints) {
+      const mapped = mapVideoPointToContainer(pt, vw, vh, cw, ch);
+      ctx.beginPath();
+      ctx.arc(mapped.x, mapped.y, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const drawEye = (pts: Point2D[]) => {
+      if (pts.length < 6) return;
+      ctx.strokeStyle = '#DF6A24';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      const first = mapVideoPointToContainer(pts[0], vw, vh, cw, ch);
+      ctx.moveTo(first.x, first.y);
+      for (let i = 1; i < pts.length; i++) {
+        const mapped = mapVideoPointToContainer(pts[i], vw, vh, cw, ch);
+        ctx.lineTo(mapped.x, mapped.y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    };
+    drawEye(detected.leftEyePoints);
+    drawEye(detected.rightEyePoints);
+  }, []);
+
+  const updateTrackedOvalFromFace = useCallback((detected: TrackedFaceFrame | null) => {
+    const video = videoRef.current;
+    const viewport = viewportRef.current;
+    if (!detected || !video || !video.videoWidth || !video.videoHeight || !viewport) {
+      smoothedRectRef.current = null;
+      setTrackedOval(null);
+      return;
+    }
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const cw = viewport.clientWidth;
+    const ch = viewport.clientHeight;
+    if (!cw || !ch) return;
+
+    const scale = Math.min(cw / vw, ch / vh);
+    const center = mapVideoPointToContainer(
+      {
+        x: detected.box.x + detected.box.width / 2,
+        y: detected.box.y + detected.box.height / 2,
+      },
+      vw,
+      vh,
+      cw,
+      ch
+    );
+
+    const rawHeight = Math.max(
+      detected.box.height * scale * 1.45,
+      detected.box.width * scale * 1.65
+    );
+    const height = clamp(rawHeight, Math.min(ch * 0.45, 180), ch * 0.82);
+    const width = clamp(height * 0.74, 140, cw * 0.82);
+
+    const targetLeft = clamp(center.x - width / 2, 8, Math.max(8, cw - width - 8));
+    const targetTop = clamp(center.y - height / 2, 8, Math.max(8, ch - height - 8));
+
+    const prev = smoothedRectRef.current;
+    const alpha = 0.65; // Highly responsive tracking without lag
+    const next: TrackedOvalRect = prev
+      ? {
+          left: prev.left + (targetLeft - prev.left) * alpha,
+          top: prev.top + (targetTop - prev.top) * alpha,
+          width: prev.width + (width - prev.width) * alpha,
+          height: prev.height + (height - prev.height) * alpha,
+        }
+      : {
+          left: targetLeft,
+          top: targetTop,
+          width,
+          height,
+        };
+
+    smoothedRectRef.current = next;
+    setTrackedOval(next);
+  }, []);
+
+  const stopCameraImmediately = useCallback(() => {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    stopCameraStream(streamRef.current, videoRef.current);
+    streamRef.current = null;
+    smoothedRectRef.current = null;
+    setTrackedOval(null);
+    drawLandmarks(null);
+  }, [drawLandmarks]);
+
+  const dispatchResult = useCallback((result: VerificationResult) => {
+    latestPropsRef.current.onComplete(result);
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'VTU_FACIAL_VERIFICATION_RESULT', result }, '*');
+      }
+    } catch {
+      // Ignore cross-origin frame restrictions
+    }
+  }, []);
+
+  const emitFailure = useCallback(
+    (failureReason: string, faceDetected = false, livenessVerified = false) => {
+      if (finishedRef.current) return;
+      finishedRef.current = true;
+      stopCameraImmediately();
+      setUiState({ phase: 'failure', message: failureReason });
+
+      const {
+        studentId: stuId,
+        verificationSessionId: sessId,
+        qrSessionId: qrId,
+        challengeType: chType,
+      } = latestPropsRef.current;
+
+      dispatchResult({
+        studentId: stuId,
+        qrSessionId: qrId,
+        verificationSessionId: sessId,
+        challengeType: chType,
+        faceDetected,
+        faceMatch: 'NO_MATCH',
+        blinkDetected: livenessVerified,
+        livenessVerified,
+        verificationStatus: 'FAILED',
+        modelId: ACTIVE_MODEL_ID,
+        modelVersion: ACTIVE_MODEL_VERSION,
+        confidenceScore: null,
+        euclideanDistance: null,
+        cosineSimilarity: null,
+        thresholdUsed: DEFAULT_THRESHOLD,
+        failureReason,
+        verifiedAt: new Date().toISOString(),
+        resultSignature: '',
+      });
+    },
+    [dispatchResult, stopCameraImmediately]
+  );
+
+  const submitCapturedEvidence = useCallback(async () => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+
+    const video = videoRef.current;
+    const frames = capturedFramesRef.current;
+    if (video && !frames.postChallengeOpenJpeg) {
+      const snap = captureEvidenceFrameJpeg(video);
+      if (snap) frames.postChallengeOpenJpeg = snap;
+    }
+
+    stopCameraImmediately();
+    setUiState({ phase: 'verifying', message: 'Verifying identity...' });
+
+    const {
+      studentId: stuId,
+      verificationSessionId: sessId,
+      sessionToken: token,
+      qrSessionId: qrId,
+      challengeType: chType,
+      apiBaseUrl: baseUrl,
+    } = latestPropsRef.current;
+
+    if (!token) {
+      const msg = 'Signed VTU verification session token is required from the parent application.';
+      setUiState({ phase: 'failure', message: msg });
+      dispatchResult({
+        studentId: stuId,
+        qrSessionId: qrId,
+        verificationSessionId: sessId,
+        challengeType: chType,
+        faceDetected: true,
+        faceMatch: 'NO_MATCH',
+        blinkDetected: true,
+        livenessVerified: true,
+        verificationStatus: 'FAILED',
+        modelId: ACTIVE_MODEL_ID,
+        modelVersion: ACTIVE_MODEL_VERSION,
+        confidenceScore: null,
+        euclideanDistance: null,
+        cosineSimilarity: null,
+        thresholdUsed: DEFAULT_THRESHOLD,
+        failureReason: msg,
+        verifiedAt: new Date().toISOString(),
+        resultSignature: '',
+      });
+      return;
+    }
+
+    if (
+      !frames.baselineOpenJpeg ||
+      !frames.blinkClosedJpeg ||
+      !frames.challengeActionJpeg ||
+      !frames.postChallengeOpenJpeg
+    ) {
+      const msg = 'Incomplete liveness evidence frames captured.';
+      setUiState({ phase: 'failure', message: msg });
+      dispatchResult({
+        studentId: stuId,
+        qrSessionId: qrId,
+        verificationSessionId: sessId,
+        challengeType: chType,
+        faceDetected: true,
+        faceMatch: 'NO_MATCH',
+        blinkDetected: false,
+        livenessVerified: false,
+        verificationStatus: 'FAILED',
+        modelId: ACTIVE_MODEL_ID,
+        modelVersion: ACTIVE_MODEL_VERSION,
+        confidenceScore: null,
+        euclideanDistance: null,
+        cosineSimilarity: null,
+        thresholdUsed: DEFAULT_THRESHOLD,
+        failureReason: msg,
+        verifiedAt: new Date().toISOString(),
+        resultSignature: '',
+      });
+      return;
+    }
+
+    try {
+      let result: VerificationResult;
+      if (qrId) {
+        try {
+          const fin = await api.finalizeFaceAttendance(
+            {
+              verificationSessionId: sessId,
+              sessionToken: token,
+              qrSessionId: qrId,
+              evidenceFrames: frames as VerificationEvidenceFrames,
+            },
+            baseUrl
+          );
+          result = {
+            ...fin.verificationResult,
+            record: fin.record,
+            attempt: fin.attempt,
+            latencyBreakdown: fin.latencyMetrics,
+          };
+        } catch {
+          result = await verificationApi.verifyFace(
+            {
+              verificationSessionId: sessId,
+              sessionToken: token,
+              qrSessionId: qrId || undefined,
+              evidenceFrames: frames as VerificationEvidenceFrames,
+            },
+            baseUrl
+          );
+        }
+      } else {
+        result = await verificationApi.verifyFace(
+          {
+            verificationSessionId: sessId,
+            sessionToken: token,
+            qrSessionId: qrId || undefined,
+            evidenceFrames: frames as VerificationEvidenceFrames,
+          },
+          baseUrl
+        );
+      }
+
+      if (result.verificationStatus === 'VERIFIED') {
+        const latStr = result.latencyBreakdown
+          ? ` (Face Det: ${result.latencyBreakdown.detectionMs}ms, ArcFace: ${result.latencyBreakdown.embeddingMs}ms, Backend: ${result.latencyBreakdown.verificationMs}ms, Total: ${result.latencyBreakdown.totalMs}ms)`
+          : '';
+        console.log(`[VTU Facial Verification] Success! Attendance verified for ${result.studentId}${latStr}`);
+        setUiState({ phase: 'success', message: 'Identity & attendance verified successfully.' });
+      } else {
+        setUiState({
+          phase: 'failure',
+          message: result.failureReason || 'Verification failed.',
+        });
+      }
+      dispatchResult(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Server verification failed.';
+      setUiState({ phase: 'failure', message: msg });
+      dispatchResult({
+        studentId: stuId,
+        qrSessionId: qrId,
+        verificationSessionId: sessId,
+        challengeType: chType,
+        faceDetected: true,
+        faceMatch: 'NO_MATCH',
+        blinkDetected: false,
+        livenessVerified: false,
+        verificationStatus: 'FAILED',
+        modelId: ACTIVE_MODEL_ID,
+        modelVersion: ACTIVE_MODEL_VERSION,
+        confidenceScore: null,
+        euclideanDistance: null,
+        cosineSimilarity: null,
+        thresholdUsed: DEFAULT_THRESHOLD,
+        failureReason: msg,
+        verifiedAt: new Date().toISOString(),
+        resultSignature: '',
+      });
+    }
+  }, [dispatchResult, stopCameraImmediately]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      stopCameraImmediately();
+      return;
+    }
+
+    let cancelled = false;
+    finishedRef.current = false;
+    identityCheckedRef.current = false;
+    identityCheckingRef.current = false;
+    multiFaceCountRef.current = 0;
+    challengeStartedAtRef.current = null;
+    capturedFramesRef.current = {};
+    lastFrameTimeRef.current = 0;
+    lastMpTimestampRef.current = 0;
+    blinkTrackerRef.current.reset(latestPropsRef.current.challengeType);
+
+    setUiState({ phase: 'initializing', message: 'Position your face inside the frame.' });
+
+    (async () => {
+      try {
+        if (!videoRef.current) return;
+
+        const [started] = await Promise.all([
+          startFrontCamera(videoRef.current),
+          loadPretrainedFaceModels('/models'),
+        ]);
+
+        if (cancelled) {
+          stopCameraStream(started.stream, videoRef.current);
+          return;
+        }
+        streamRef.current = started.stream;
+        setUiState({ phase: 'position', message: 'Position your face inside the frame.' });
+
+        if (!scratchCanvasRef.current) {
+          scratchCanvasRef.current = document.createElement('canvas');
+        }
+
+        const runFrame = async (rafNow: number) => {
+          if (cancelled || finishedRef.current) return;
+
+          if (rafNow - lastFrameTimeRef.current >= TRACKING_INTERVAL_MS) {
+            lastFrameTimeRef.current = rafNow;
+            const video = videoRef.current;
+            const scratch = scratchCanvasRef.current;
+
+            if (video && scratch && video.readyState >= 2) {
+              try {
+                const mpTimestamp = Math.max(
+                  Math.round(rafNow),
+                  lastMpTimestampRef.current + 1
+                );
+                lastMpTimestampRef.current = mpTimestamp;
+
+                const lum = measureFrameLuminance(video, scratch);
+                const detected = trackFaceWithLandmarker(video, mpTimestamp, lum, scratch);
+
+                drawLandmarks(detected);
+                updateTrackedOvalFromFace(detected);
+
+                if (!detected) {
+                  multiFaceCountRef.current = 0;
+                  setUiState({
+                    phase: 'position',
+                    message: 'Position your face inside the frame.',
+                  });
+                } else if (detected.faceCount > 1) {
+                  multiFaceCountRef.current += 1;
+                  if (multiFaceCountRef.current >= 4) {
+                    emitFailure('Multiple faces detected.', true);
+                    return;
+                  }
+                } else {
+                  multiFaceCountRef.current = 0;
+
+                  // Check spatial positioning, lighting, sharpness without blocking intentional head turns
+                  const spatialQualityOk =
+                    detected.guidance.centeredOk &&
+                    detected.guidance.sizeOk &&
+                    detected.quality.withinBounds &&
+                    detected.quality.sharpnessScore >= 24 &&
+                    detected.quality.luminanceScore >= 26 &&
+                    detected.quality.luminanceScore <= 242;
+
+                  if (!spatialQualityOk) {
+                    setUiState({
+                      phase: 'position',
+                      message: detected.quality.failureReason || 'Position your face inside the frame.',
+                    });
+                  } else if (!identityCheckedRef.current) {
+                    // Step 1: Check facial identity against registered enrolled references
+                    if (!identityCheckingRef.current && video) {
+                      identityCheckingRef.current = true;
+                      setUiState({
+                        phase: 'verifying',
+                        message: 'Scanning face against enrolled references...',
+                      });
+                      const snapJpeg = captureEvidenceFrameJpeg(video);
+                      if (snapJpeg) {
+                        capturedFramesRef.current.baselineOpenJpeg = snapJpeg;
+                        const {
+                          verificationSessionId: sessId,
+                          sessionToken: tok,
+                          apiBaseUrl: bUrl,
+                        } = latestPropsRef.current;
+                        verificationApi
+                          .identifyFace(
+                            {
+                              verificationSessionId: sessId,
+                              sessionToken: tok || '',
+                              liveFrameJpeg: snapJpeg,
+                            },
+                            bUrl
+                          )
+                          .then((identRes) => {
+                            if (finishedRef.current) return;
+                            if (
+                              identRes.status === 'NO_USER_FOUND' ||
+                              (!identRes.matched && !identRes.isProxy)
+                            ) {
+                              emitFailure('No User Found', true, false);
+                            } else if (identRes.isProxy) {
+                              emitFailure(
+                                identRes.message ||
+                                  'Proxy attempt rejected: Face does not match registered student.',
+                                true,
+                                false
+                              );
+                            } else if (identRes.matched) {
+                              identityCheckedRef.current = true;
+                              identityCheckingRef.current = false;
+                              setUiState({
+                                phase: 'blink',
+                                message: `Identity Confirmed: ${identRes.studentName} (${identRes.matchedUsn}). Please blink naturally.`,
+                              });
+                            } else {
+                              identityCheckingRef.current = false;
+                            }
+                          })
+                          .catch(() => {
+                            identityCheckingRef.current = false;
+                          });
+                      } else {
+                        identityCheckingRef.current = false;
+                      }
+                    }
+                  } else {
+                    // Step 2: Facial identity confirmed! Proceed to natural blink / liveness verification
+                    blinkTrackerRef.current.setChallengeType(latestPropsRef.current.challengeType);
+
+                    const snap = blinkTrackerRef.current.processFrame(
+                      detected.leftEyePoints,
+                      detected.rightEyePoints,
+                      detected.allPoints,
+                      Date.now(),
+                      {
+                        eyeBlinkLeft: detected.eyeBlinkLeft,
+                        eyeBlinkRight: detected.eyeBlinkRight,
+                        depthParallaxScore: detected.depthParallaxScore,
+                        yawDeg: detected.quality.yawDeg,
+                        pitchDeg: detected.quality.pitchDeg,
+                      }
+                    );
+
+                    // Enforce time-limited challenge once face enters calibration/liveness
+                    if (!challengeStartedAtRef.current) {
+                      challengeStartedAtRef.current = Date.now();
+                    } else if (Date.now() - challengeStartedAtRef.current > CHALLENGE_TIMEOUT_MS) {
+                      emitFailure('Verification challenge timed out.', true);
+                      return;
+                    }
+
+                    // Capture requested evidence JPEG at exact challenge milestones
+                    if (snap.captureRoleNeeded) {
+                      const jpegStr = captureEvidenceFrameJpeg(video);
+                      if (jpegStr) {
+                        capturedFramesRef.current[snap.captureRoleNeeded] = jpegStr;
+                        blinkTrackerRef.current.markCaptured(snap.captureRoleNeeded);
+                      }
+                    }
+
+                    if (snap.challengePhase === 'CALIBRATING') {
+                      if (!detected.quality.passed) {
+                        setUiState({
+                          phase: 'position',
+                          message: detected.quality.failureReason || 'Look straight at the camera.',
+                        });
+                      } else {
+                        setUiState({ phase: 'detected', message: snap.instruction });
+                      }
+                    } else if (
+                      snap.challengePhase === 'AWAIT_BLINK' ||
+                      snap.challengePhase === 'AWAIT_HEAD_ACTION' ||
+                      snap.challengePhase === 'AWAIT_RETURN_FRONTAL'
+                    ) {
+                      setUiState({ phase: 'blink', message: snap.instruction });
+                    } else if (snap.challengePhase === 'FAILED') {
+                      emitFailure('Liveness challenge failed.', true);
+                      return;
+                    } else if (snap.challengePhase === 'COMPLETED') {
+                      await submitCapturedEvidence();
+                      return;
+                    }
+                  }
+                }
+              } catch {
+                // Skip transient inference error
+              }
+            }
+          }
+
+          if (!cancelled && !finishedRef.current) {
+            rafRef.current = window.requestAnimationFrame(runFrame);
+          }
+        };
+
+        rafRef.current = window.requestAnimationFrame(runFrame);
+      } catch (err) {
+        if (!cancelled) {
+          emitFailure(
+            err instanceof Error ? err.message : 'Unable to access front camera.',
+            false
+          );
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      stopCameraImmediately();
+    };
+  }, [
+    drawLandmarks,
+    emitFailure,
+    isOpen,
+    stopCameraImmediately,
+    submitCapturedEvidence,
+    updateTrackedOvalFromFace,
+  ]);
+
+  if (!isOpen) return null;
+
+  const outlineColor =
+    uiState.phase === 'success'
+      ? 'border-[#165B33]'
+      : uiState.phase === 'failure'
+        ? 'border-[#B42318]'
+        : uiState.phase === 'blink' || uiState.phase === 'detected'
+          ? 'border-[#DF6A24]'
+          : 'border-white/80';
+
+  const cw = viewportSize.width || 480;
+  const ch = viewportSize.height || 360;
+  const defaultOvalHeight = clamp(ch * 0.72, 200, Math.max(200, ch - 30));
+  const defaultOvalWidth = clamp(defaultOvalHeight * 0.72, 145, Math.max(145, cw * 0.75));
+
+  const activeOval: TrackedOvalRect = trackedOval ?? {
+    left: (cw - defaultOvalWidth) / 2,
+    top: (ch - defaultOvalHeight) / 2,
+    width: defaultOvalWidth,
+    height: defaultOvalHeight,
+  };
+
+  return (
+    <div className="w-full max-w-xl mx-auto flex flex-col rounded-md border border-[#E3D2B4] bg-[#FFFDF8] overflow-hidden shadow-sm">
+      {/* Natural Camera Field of View (No digital zoom, responsive framing, 1:1 landmark alignment) */}
+      <div
+        ref={viewportRef}
+        className="relative w-full aspect-[4/3] sm:aspect-[16/10] bg-[#1a120c] overflow-hidden flex items-center justify-center"
+      >
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          className={`w-full h-full object-contain -scale-x-100 ${
+            uiState.phase === 'success' || uiState.phase === 'failure'
+              ? 'opacity-30'
+              : 'opacity-100'
+          }`}
+        />
+
+        <canvas
+          ref={overlayCanvasRef}
+          className="pointer-events-none absolute inset-0 w-full h-full"
+        />
+
+        <div
+          style={{
+            left: `${activeOval.left}px`,
+            top: `${activeOval.top}px`,
+            width: `${activeOval.width}px`,
+            height: `${activeOval.height}px`,
+          }}
+          className={`pointer-events-none absolute rounded-[999px] border-[2.5px] ${
+            trackedOval ? 'border-solid' : 'border-dashed'
+          } ${outlineColor} transition-[left,top,width,height,border-color] duration-75 ease-out`}
+        />
+
+        {onCancel && (
+          <button
+            type="button"
+            aria-label="Cancel verification"
+            onClick={() => {
+              stopCameraImmediately();
+              onCancel();
+            }}
+            className="absolute top-3 right-3 rounded-full bg-[#241710]/70 p-2 text-white hover:bg-[#241710]"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        )}
+      </div>
+
+      {/* Minimal Status Line */}
+      <div className="px-4 py-3 border-t border-[#E3D2B4] bg-[#FFFDF8] flex items-center justify-center gap-2 text-center shrink-0">
+        {uiState.phase === 'success' && (
+          <CheckCircle2 className="w-4 h-4 text-[#165B33] shrink-0" />
+        )}
+        {uiState.phase === 'failure' && (
+          <XCircle className="w-4 h-4 text-[#B42318] shrink-0" />
+        )}
+        <span
+          className={`text-sm font-medium ${
+            uiState.phase === 'success'
+              ? 'text-[#165B33]'
+              : uiState.phase === 'failure'
+                ? 'text-[#B42318]'
+                : uiState.phase === 'blink'
+                  ? 'text-[#DF6A24]'
+                  : 'text-[#241710]'
+          }`}
+        >
+          {uiState.message}
+        </span>
+      </div>
+    </div>
+  );
+};

@@ -25,6 +25,7 @@ import { TimetableView } from './views/TimetableView.tsx';
 import { QRScannerModal } from './components/QRScannerModal.tsx';
 import { FacultyQRAttendanceView } from './views/FacultyQRAttendanceView.tsx';
 import { AdminAttendanceMonitoringView } from './views/AdminAttendanceMonitoringView.tsx';
+import { AdminFacialModelView } from './views/AdminFacialModelView.tsx';
 
 function getDomainRoutePath(role: UserRole, section: NavigationSection): string {
   const slug = role === 'admin' && section === 'dashboard' ? 'overview' : section;
@@ -599,6 +600,14 @@ export default function App() {
           onPolicyUpdated={(updated) => {
             setWorkspace((prev) => (prev ? { ...prev, policy: updated } : null));
           }}
+        />
+      )}
+
+      {/* Facial Model Management & AI Training Platform (Admin) */}
+      {workspace.user.role === 'admin' && activeSection === 'admin-facial-model' && (
+        <AdminFacialModelView
+          user={workspace.user}
+          policy={workspace.policy}
         />
       )}
 
