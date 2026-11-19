@@ -57,41 +57,65 @@ export function getFaceLandmarker(): FaceLandmarker | null {
   return faceLandmarkerInstance;
 }
 
-async function createMediaPipeFaceLandmarker(modelBaseUrl: string): Promise<FaceLandmarker> {
+async function resolveVisionFileset(): Promise<Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>> {
+  try {
+    return await FilesetResolver.forVisionTasks('/mediapipe/wasm');
+  } catch (localErr) {
+    console.warn('[FaceLandmarker] Local /mediapipe/wasm failed, trying CDN fallback...', localErr);
+    return await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm'
+    );
+  }
+}
+
+export async function createMediaPipeFaceLandmarker(
+  modelBaseUrl: string,
+  forceCpu = false
+): Promise<FaceLandmarker> {
   installBenignTfliteLogFilter();
-  const vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm');
+  const vision = await resolveVisionFileset();
   const modelAssetPath = `${modelBaseUrl}/face_landmarker.task`;
 
   const commonOptions = {
     runningMode: 'VIDEO' as const,
     numFaces: 4,
-    minFaceDetectionConfidence: 0.45,
-    minFacePresenceConfidence: 0.45,
-    minTrackingConfidence: 0.45,
+    minFaceDetectionConfidence: 0.35,
+    minFacePresenceConfidence: 0.35,
+    minTrackingConfidence: 0.35,
     outputFaceBlendshapes: true,
   };
 
-  if (isWebGL2Supported()) {
+  if (!forceCpu && isWebGL2Supported()) {
     try {
-      return await FaceLandmarker.createFromOptions(vision, {
+      console.log('[FaceLandmarker] Initializing with GPU delegate...');
+      const landmarker = await FaceLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath,
           delegate: 'GPU',
         },
         ...commonOptions,
       });
-    } catch {
-      // Fall through to XNNPACK CPU delegate
+      console.log('[FaceLandmarker] GPU delegate initialized successfully');
+      return landmarker;
+    } catch (gpuErr) {
+      console.warn('[FaceLandmarker] GPU delegate failed, falling back to CPU:', gpuErr);
     }
   }
 
-  return await FaceLandmarker.createFromOptions(vision, {
+  console.log('[FaceLandmarker] Initializing with CPU delegate...');
+  const landmarker = await FaceLandmarker.createFromOptions(vision, {
     baseOptions: {
       modelAssetPath,
       delegate: 'CPU',
     },
     ...commonOptions,
   });
+  console.log('[FaceLandmarker] CPU delegate initialized successfully');
+  return landmarker;
+}
+
+export function setFaceLandmarkerInstance(instance: FaceLandmarker | null): void {
+  faceLandmarkerInstance = instance;
 }
 
 export async function loadPretrainedFaceModels(

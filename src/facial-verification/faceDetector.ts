@@ -36,6 +36,7 @@ export interface TrackedFaceFrame {
   depthParallaxScore: number;
   quality: FaceQualityMetrics;
   allPoints: Point2D[];
+  contourPoints: Point2D[];
   guidance: FacePositionGuidance;
 }
 
@@ -79,8 +80,15 @@ export function trackFaceWithLandmarker(
     return null;
   }
 
-  const result = landmarker.detectForVideo(videoEl, timestampMs);
-  const faceCount = result.faceLandmarks?.length || 0;
+  let result;
+  try {
+    result = landmarker.detectForVideo(videoEl, timestampMs);
+  } catch (err) {
+    console.warn('[FaceDetector] detectForVideo failed:', err);
+    return null;
+  }
+
+  const faceCount = result?.faceLandmarks?.length || 0;
   if (faceCount === 0) {
     return null;
   }
@@ -127,7 +135,8 @@ export function trackFaceWithLandmarker(
 
   const leftEyePoints = MP_LEFT_EYE_EAR_INDICES.map(toPoint);
   const rightEyePoints = MP_RIGHT_EYE_EAR_INDICES.map(toPoint);
-  const allPoints = MP_CONTOUR_SUBSET_INDICES.map(toPoint);
+  const contourPoints = MP_CONTOUR_SUBSET_INDICES.map(toPoint);
+  const allPoints = landmarks.map((pt) => ({ x: pt.x * vw, y: pt.y * vh }));
 
   const subjectRightEyeCenter = avgPoints([33, 133, 159, 145]);
   const subjectLeftEyeCenter = avgPoints([362, 263, 386, 374]);
@@ -181,6 +190,7 @@ export function trackFaceWithLandmarker(
         failureReason: 'Multiple faces detected.',
       },
       allPoints,
+      contourPoints,
       guidance: {
         faceCount,
         singleFaceOk: false,
@@ -216,6 +226,7 @@ export function trackFaceWithLandmarker(
     depthParallaxScore,
     quality,
     allPoints,
+    contourPoints,
     guidance: {
       faceCount: 1,
       singleFaceOk: true,

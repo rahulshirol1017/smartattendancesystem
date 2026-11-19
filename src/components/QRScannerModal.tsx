@@ -13,7 +13,7 @@ import {
   Info,
   ScanFace,
 } from 'lucide-react';
-import { api } from '../api/client.ts';
+import { api, verificationApi } from '../api/client.ts';
 import { FacialVerification } from './FacialVerification.tsx';
 import {
   AttendanceRecord,
@@ -322,6 +322,41 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
     ]
   );
 
+  const handleBypassQr = useCallback(async () => {
+    try {
+      stopRearCamera();
+      setStatus('validating_qr');
+      setStatusMessage('Initializing Facial Recognition (Bypass Mode)...');
+      let sessId = 'dev-test-' + Date.now();
+      let sessTok = 'dev-test-token-' + Date.now();
+      let challenge: LivenessChallengeType = 'BLINK_AND_HEAD_LEFT';
+
+      try {
+        const sess = await verificationApi.createSession({
+          studentId: user.identifier,
+          qrSessionId: activeSession?.id || 'demo-session',
+        });
+        if (sess) {
+          sessId = sess.verificationSessionId;
+          sessTok = sess.sessionToken;
+          challenge = sess.challengeType || challenge;
+        }
+      } catch (e) {
+        console.warn('verificationApi.createSession fallback to dev-test:', e);
+      }
+
+      setVerificationSessionId(sessId);
+      setSessionToken(sessTok);
+      setResolvedQrSessionId(activeSession?.id || 'demo-session');
+      setChallengeType(challenge);
+      setChallengeInstruction('Position your face inside the frame. Live facial recognition will verify your identity.');
+      setFlowStep('face_verification');
+      setStatus('idle');
+    } catch (err) {
+      console.error('Bypass error:', err);
+    }
+  }, [activeSession?.id, stopRearCamera, user.identifier]);
+
   // Initialize camera and scanning loop for QR stage
   const startCamera = useCallback(async () => {
     setCameraError(null);
@@ -541,6 +576,16 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* Direct Bypass Button for Facial Verification Testing */}
+              <button
+                type="button"
+                onClick={handleBypassQr}
+                className="mt-3.5 w-full max-w-[320px] bg-[#165B33] hover:bg-[#124b2a] text-white text-xs font-semibold py-2.5 px-4 rounded-md shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ScanFace className="w-4 h-4 text-[#DF6A24]" />
+                <span>Bypass QR — Test Facial Recognition Directly</span>
+              </button>
             </div>
           )}
 

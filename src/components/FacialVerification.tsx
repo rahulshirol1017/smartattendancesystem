@@ -188,18 +188,115 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
+    const scale = Math.min(cw / vw, ch / vh);
+    const renderedW = vw * scale;
+    const renderedH = vh * scale;
+    const offsetX = (cw - renderedW) / 2;
+    const offsetY = (ch - renderedH) / 2;
 
-    ctx.fillStyle = 'rgba(250, 243, 227, 0.68)';
-    for (const pt of detected.allPoints) {
+    // Horizontally mirrored bounding box (matching CSS -scale-x-100 video)
+    const boxLeft = offsetX + (vw - (detected.box.x + detected.box.width)) * scale;
+    const boxTop = offsetY + detected.box.y * scale;
+    const boxWidth = detected.box.width * scale;
+    const boxHeight = detected.box.height * scale;
+
+    const isGoodQuality = detected.quality?.passed ?? false;
+    const primaryColor = isGoodQuality ? '#10B981' : '#DF6A24';
+
+    // 1. Draw corner brackets around the detected face
+    const cornerLength = Math.min(22, boxWidth * 0.25, boxHeight * 0.25);
+    ctx.strokeStyle = primaryColor;
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Top-Left
+    ctx.beginPath();
+    ctx.moveTo(boxLeft, boxTop + cornerLength);
+    ctx.lineTo(boxLeft, boxTop);
+    ctx.lineTo(boxLeft + cornerLength, boxTop);
+    ctx.stroke();
+
+    // Top-Right
+    ctx.beginPath();
+    ctx.moveTo(boxLeft + boxWidth - cornerLength, boxTop);
+    ctx.lineTo(boxLeft + boxWidth, boxTop);
+    ctx.lineTo(boxLeft + boxWidth, boxTop + cornerLength);
+    ctx.stroke();
+
+    // Bottom-Left
+    ctx.beginPath();
+    ctx.moveTo(boxLeft, boxTop + boxHeight - cornerLength);
+    ctx.lineTo(boxLeft, boxTop + boxHeight);
+    ctx.lineTo(boxLeft + cornerLength, boxTop + boxHeight);
+    ctx.stroke();
+
+    // Bottom-Right
+    ctx.beginPath();
+    ctx.moveTo(boxLeft + boxWidth - cornerLength, boxTop + boxHeight);
+    ctx.lineTo(boxLeft + boxWidth, boxTop + boxHeight);
+    ctx.lineTo(boxLeft + boxWidth, boxTop + boxHeight - cornerLength);
+    ctx.stroke();
+
+    // Subtle dashed bounding box outline
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = isGoodQuality ? 'rgba(16, 185, 129, 0.4)' : 'rgba(223, 106, 36, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(boxLeft, boxTop, boxWidth, boxHeight);
+    ctx.setLineDash([]);
+
+    // 2. Confidence tag above bounding box
+    const tagText = isGoodQuality ? 'FACE ALIGNED' : 'FACE DETECTED';
+    ctx.font = '600 11px system-ui, sans-serif';
+    const textWidth = ctx.measureText(tagText).width;
+    const badgePadding = 6;
+    const badgeHeight = 18;
+    const badgeX = Math.max(8, boxLeft);
+    const badgeY = Math.max(badgeHeight + 2, boxTop - 6);
+
+    ctx.fillStyle = primaryColor;
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(badgeX, badgeY - badgeHeight, textWidth + badgePadding * 2, badgeHeight, 4);
+    } else {
+      ctx.rect(badgeX, badgeY - badgeHeight, textWidth + badgePadding * 2, badgeHeight);
+    }
+    ctx.fill();
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText(tagText, badgeX + badgePadding, badgeY - 5);
+
+    // 3. Draw accurate landmark dots on the face
+    const pointsToDraw = detected.contourPoints && detected.contourPoints.length > 0
+      ? detected.contourPoints
+      : detected.allPoints.slice(0, 60);
+
+    ctx.fillStyle = 'rgba(0, 229, 255, 0.85)';
+    for (const pt of pointsToDraw) {
       const mapped = mapVideoPointToContainer(pt, vw, vh, cw, ch);
       ctx.beginPath();
-      ctx.arc(mapped.x, mapped.y, 1.4, 0, Math.PI * 2);
+      ctx.arc(mapped.x, mapped.y, 1.8, 0, Math.PI * 2);
       ctx.fill();
     }
 
+    // 4. Five key alignment anchor points (eyes, nose, mouth)
+    if (detected.alignmentFivePoints) {
+      for (const pt of detected.alignmentFivePoints) {
+        const mapped = mapVideoPointToContainer(pt, vw, vh, cw, ch);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.arc(mapped.x, mapped.y, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = primaryColor;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+
+    // 5. Eye outlines
     const drawEye = (pts: Point2D[]) => {
       if (pts.length < 6) return;
-      ctx.strokeStyle = '#DF6A24';
+      ctx.strokeStyle = primaryColor;
       ctx.lineWidth = 1.8;
       ctx.beginPath();
       const first = mapVideoPointToContainer(pts[0], vw, vh, cw, ch);
@@ -713,8 +810,8 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                     }
                   }
                 }
-              } catch {
-                // Skip transient inference error
+              } catch (frameErr) {
+                console.warn('[VTU Verification] runFrame error:', frameErr);
               }
             }
           }
