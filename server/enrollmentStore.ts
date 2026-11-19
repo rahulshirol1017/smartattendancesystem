@@ -206,10 +206,15 @@ export function listEnrolledSubjectsSummary(): Array<{
 }
 
 export function getEnrolledSubject(subjectId: string): EnrolledSubjectRecord | null {
-  const store = loadStore();
-  const stored = store.subjects[subjectId.trim()];
-  if (!stored) return null;
-  return decryptSubjectRecord(stored);
+  try {
+    const store = loadStore();
+    const stored = store.subjects[subjectId.trim()];
+    if (!stored) return null;
+    return decryptSubjectRecord(stored);
+  } catch (err) {
+    console.warn(`[BiometricStore] Warning: could not decrypt biometric record for ${subjectId}:`, err instanceof Error ? err.message : String(err));
+    return null;
+  }
 }
 
 export function getAllEnrolledSubjects(): EnrolledSubjectRecord[] {

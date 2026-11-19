@@ -4486,35 +4486,36 @@ async function startServer(): Promise<void> {
     requireAuth,
     requireRoles('student'),
     async (req: AuthenticatedRequest, res: Response) => {
-      const student = req.user!;
-      const {
-        sessionId,
-        qrToken,
-        latitude,
-        longitude,
-        accuracy,
-        deviceFingerprint,
-        devicePlatform,
-        browserName,
-      } = req.body as {
-        sessionId?: string;
-        qrToken?: string;
-        latitude?: number;
-        longitude?: number;
-        accuracy?: number;
-        deviceFingerprint?: string;
-        devicePlatform?: string;
-        browserName?: string;
-      };
+      try {
+        const student = req.user!;
+        const {
+          sessionId,
+          qrToken,
+          latitude,
+          longitude,
+          accuracy,
+          deviceFingerprint,
+          devicePlatform,
+          browserName,
+        } = req.body as {
+          sessionId?: string;
+          qrToken?: string;
+          latitude?: number;
+          longitude?: number;
+          accuracy?: number;
+          deviceFingerprint?: string;
+          devicePlatform?: string;
+          browserName?: string;
+        };
 
-      if (!sessionId || !qrToken) {
-        res.status(400).json({
-          success: false,
-          classification: 'REJECTED',
-          message: 'Session identifier and scanned QR token are required.',
-        });
-        return;
-      }
+        if (!sessionId || !qrToken) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'Session identifier and scanned QR token are required.',
+          });
+          return;
+        }
 
       const policy = await repo.getPolicy();
       const session = await repo.getQrSessionById(sessionId);
@@ -4648,7 +4649,15 @@ async function startServer(): Promise<void> {
         enrolled: hasEnrolled,
         referenceEmbeddings: enrolledRef ? enrolledRef.embeddings : [],
       });
+    } catch (err) {
+      console.error('[QR Scan Error]', err);
+      res.status(500).json({
+        success: false,
+        classification: 'REJECTED',
+        message: err instanceof Error ? err.message : 'Internal error during QR scan validation.',
+      });
     }
+  }
   );
 
   // 1B. Live Face Identification & Proxy Check before Blink Challenge (Requirement 4)
@@ -4794,19 +4803,20 @@ async function startServer(): Promise<void> {
     requireAuth,
     requireRoles('student'),
     async (req: AuthenticatedRequest, res: Response) => {
-      const reqStart = performance.now();
-      const student = req.user!;
-      const {
-        verificationSessionId,
-        sessionToken,
-        qrSessionId,
-        evidenceFrames,
-      } = req.body as {
-        verificationSessionId?: string;
-        sessionToken?: string;
-        qrSessionId?: string;
-        evidenceFrames?: VerificationEvidenceFrames;
-      };
+      try {
+        const reqStart = performance.now();
+        const student = req.user!;
+        const {
+          verificationSessionId,
+          sessionToken,
+          qrSessionId,
+          evidenceFrames,
+        } = req.body as {
+          verificationSessionId?: string;
+          sessionToken?: string;
+          qrSessionId?: string;
+          evidenceFrames?: VerificationEvidenceFrames;
+        };
 
       if (!verificationSessionId || !sessionToken || !evidenceFrames) {
         res.status(400).json({
@@ -5006,7 +5016,15 @@ async function startServer(): Promise<void> {
         verificationResult: signedRes,
         latencyMetrics: latencyBreakdown,
       });
+    } catch (err) {
+      console.error('[Finalize Attendance Error]', err);
+      res.status(500).json({
+        success: false,
+        classification: 'REJECTED',
+        message: err instanceof Error ? err.message : 'Internal error during facial verification and attendance recording.',
+      });
     }
+  }
   );
 
   // ============================================================================
