@@ -242,20 +242,25 @@ export default function App() {
   }
 
   if (loadError) {
+    const isColdBoot = loadError.includes('502') || loadError.includes('standby') || loadError.includes('waking up');
     return (
       <div className="min-h-screen bg-[#FAF3E3] flex items-center justify-center p-6">
-        <div className="max-w-md w-full rounded-md border border-[#E3D2B4] bg-white p-6 space-y-4">
+        <div className="max-w-md w-full rounded-md border border-[#E3D2B4] bg-white p-6 space-y-4 shadow-sm text-center">
           <div className="text-base font-semibold text-[#165B33]">
-            Could not load the portal
+            {isColdBoot ? 'Server Waking Up' : 'Could not load the portal'}
           </div>
-          <p className="text-sm text-[#6B5A4C]">{loadError}</p>
+          <p className="text-sm text-[#6B5A4C]">
+            {isColdBoot
+              ? 'The Render cloud instance was asleep on free-tier standby and is now running. Click Try again below to enter.'
+              : loadError}
+          </p>
           <button
             type="button"
             onClick={() => {
               setLoading(true);
               loadWorkspaceData();
             }}
-            className="inline-flex items-center gap-2 rounded bg-[#165B33] px-4 py-2 text-sm font-medium text-white hover:bg-[#104526]"
+            className="inline-flex items-center gap-2 rounded bg-[#165B33] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#104526] transition-colors shadow-sm"
           >
             <RefreshCw className="w-4 h-4" />
             <span>Try again</span>

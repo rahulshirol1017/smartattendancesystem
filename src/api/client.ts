@@ -64,7 +64,7 @@ export function setStoredToken(token: string | null): void {
   }
 }
 
-async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
+async function requestJson<T>(url: string, options: RequestInit = {}, retries = 3): Promise<T> {
   const token = getStoredToken();
   const headers = new Headers(options.headers || {});
   if (token) {
@@ -74,21 +74,37 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
     headers.set('Content-Type', 'application/json');
   }
 
-  const res = await fetch(url, {
-    ...options,
-    headers,
-    credentials: 'include',
-  });
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers,
+      credentials: 'include',
+    });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new ApiRequestError(
-      data.error || `Request failed with status ${res.status}`,
-      res.status,
-      Array.isArray(data.conflicts) ? data.conflicts : undefined
-    );
+    // Auto-retry on Render Free Tier cold-boot gateway responses (502/503/504)
+    if ((res.status === 502 || res.status === 503 || res.status === 504) && retries > 0) {
+      console.warn(`[API] Received HTTP ${res.status} from ${url}. Cloud instance waking up. Retrying in 2s (${retries} attempts left)...`);
+      await new Promise((r) => setTimeout(r, 2000));
+      return requestJson<T>(url, options, retries - 1);
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new ApiRequestError(
+        data.error || (res.status === 502 ? 'The cloud server was waking up from standby. Please click Try again.' : `Request failed with status ${res.status}`),
+        res.status,
+        Array.isArray(data.conflicts) ? data.conflicts : undefined
+      );
+    }
+    return data as T;
+  } catch (err) {
+    if (retries > 0 && err instanceof TypeError) {
+      // Network hiccup during container transition
+      await new Promise((r) => setTimeout(r, 2000));
+      return requestJson<T>(url, options, retries - 1);
+    }
+    throw err;
   }
-  return data as T;
 }
 
 export interface BootstrapPayload {
