@@ -31,9 +31,11 @@ COPY public ./public
 COPY .secure_store ./.secure_store
 COPY tsconfig.json ./
 
-# Create storage directories
-RUN mkdir -p .local_db .private_uploads .secure_store
+# Create storage directories with write permissions for cloud runtimes
+RUN mkdir -p .local_db .private_uploads .secure_store && \
+    chmod -R 777 .local_db .private_uploads .secure_store /app
 
 EXPOSE 3000
+EXPOSE 7860
 
 CMD ["npm", "start"]
