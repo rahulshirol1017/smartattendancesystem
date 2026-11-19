@@ -990,10 +990,10 @@ export const api = {
     );
   },
 
-  testFaceImageQuality(imageBase64: string): Promise<FaceQualityMetrics> {
+  testFaceImageQuality(imageBase64: string, angleLabel?: string): Promise<FaceQualityMetrics> {
     return requestJson<FaceQualityMetrics>('/api/admin/facial/test-quality', {
       method: 'POST',
-      body: JSON.stringify({ imageBase64 }),
+      body: JSON.stringify({ imageBase64, angleLabel }),
     });
   },
 

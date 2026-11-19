@@ -79,6 +79,23 @@ export const AdminFacialModelView: React.FC<AdminFacialModelViewProps> = ({ user
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  // Robust callback ref ensures video element receives media stream immediately when mounted
+  const setVideoRef = useCallback((el: HTMLVideoElement | null) => {
+    videoRef.current = el;
+    if (el && streamRef.current) {
+      el.srcObject = streamRef.current;
+      el.play().catch(() => {});
+    }
+  }, []);
+
+  // Ensure webcam stream is attached if element mounts after state transition
+  useEffect(() => {
+    if (isCameraActive && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [isCameraActive]);
+
   // Training & Model Registry State
   const [trainingStatus, setTrainingStatus] = useState<TrainingJobStatus | null>(null);
   const [epochs, setEpochs] = useState<number>(20);
@@ -166,11 +183,11 @@ export const AdminFacialModelView: React.FC<AdminFacialModelViewProps> = ({ user
         audio: false,
       });
       streamRef.current = stream;
+      setIsCameraActive(true);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play();
+        videoRef.current.play().catch(() => {});
       }
-      setIsCameraActive(true);
     } catch (err) {
       setErrorMsg('Unable to access webcam. You can also upload sample photos directly.');
     }
@@ -196,7 +213,7 @@ export const AdminFacialModelView: React.FC<AdminFacialModelViewProps> = ({ user
 
     setQualityTesting(true);
     try {
-      const qReport = await api.testFaceImageQuality(base64);
+      const qReport = await api.testFaceImageQuality(base64, selectedAngle);
       setLastQualityReport(qReport);
 
       if (!qReport.passed) {
@@ -227,30 +244,47 @@ export const AdminFacialModelView: React.FC<AdminFacialModelViewProps> = ({ user
 
     Array.from(files).forEach((file) => {
       const reader = new FileReader();
-      reader.onload = async () => {
-        const base64 = reader.result as string;
-        setQualityTesting(true);
-        try {
-          const qReport = await api.testFaceImageQuality(base64);
-          if (qReport.passed) {
-            setCapturedImages((prev) => [
-              ...prev,
-              {
-                base64,
-                angleLabel: selectedAngle,
-                lightingLabel: selectedLighting,
-                qualityScore: Math.round(qReport.sharpnessScore),
-              },
-            ]);
-            setSuccessMsg(`File ${file.name} validated and added!`);
-          } else {
-            setErrorMsg(`File ${file.name} rejected: ${qReport.failureReason}`);
+      reader.onload = () => {
+        const rawDataUrl = reader.result as string;
+        // Normalize any image format (PNG, WebP, JPEG) to JPEG data URL via offscreen canvas
+        const img = new Image();
+        img.onload = async () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || 640;
+          canvas.height = img.naturalHeight || 480;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const base64 = canvas.toDataURL('image/jpeg', 0.92);
+
+          setQualityTesting(true);
+          try {
+            const qReport = await api.testFaceImageQuality(base64, selectedAngle);
+            setLastQualityReport(qReport);
+            if (qReport.passed) {
+              setCapturedImages((prev) => [
+                ...prev,
+                {
+                  base64,
+                  angleLabel: selectedAngle,
+                  lightingLabel: selectedLighting,
+                  qualityScore: Math.round(qReport.sharpnessScore),
+                },
+              ]);
+              setSuccessMsg(`File ${file.name} validated and added!`);
+            } else {
+              setErrorMsg(`File ${file.name} rejected: ${qReport.failureReason}`);
+            }
+          } catch (err) {
+            setErrorMsg(`Failed to test quality for ${file.name}`);
+          } finally {
+            setQualityTesting(false);
           }
-        } catch (err) {
-          setErrorMsg(`Failed to test quality for ${file.name}`);
-        } finally {
-          setQualityTesting(false);
-        }
+        };
+        img.onerror = () => {
+          setErrorMsg(`Unable to process image file ${file.name}.`);
+        };
+        img.src = rawDataUrl;
       };
       reader.readAsDataURL(file);
     });
@@ -836,7 +870,7 @@ export const AdminFacialModelView: React.FC<AdminFacialModelViewProps> = ({ user
 
                     {isCameraActive && (
                       <div className="relative aspect-4/3 w-full max-w-sm mx-auto bg-black rounded overflow-hidden mb-3">
-                        <video ref={videoRef} playsInline autoPlay muted className="w-full h-full object-cover -scale-x-100" />
+                        <video ref={setVideoRef} playsInline autoPlay muted className="w-full h-full object-cover -scale-x-100" />
                         <div className="absolute inset-0 border-2 border-dashed border-[#DF6A24]/70 rounded-full m-8 pointer-events-none" />
                         <div className="absolute bottom-2 inset-x-0 flex justify-center">
                           <button

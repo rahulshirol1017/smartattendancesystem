@@ -114,6 +114,7 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
   const smoothedRectRef = useRef<TrackedOvalRect | null>(null);
   const identityCheckedRef = useRef<boolean>(false);
   const identityCheckingRef = useRef<boolean>(false);
+  const identifyAttemptsRef = useRef<number>(0);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
@@ -503,6 +504,7 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
     finishedRef.current = false;
     identityCheckedRef.current = false;
     identityCheckingRef.current = false;
+    identifyAttemptsRef.current = 0;
     multiFaceCountRef.current = 0;
     challengeStartedAtRef.current = null;
     capturedFramesRef.current = {};
@@ -574,9 +576,9 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                     detected.guidance.centeredOk &&
                     detected.guidance.sizeOk &&
                     detected.quality.withinBounds &&
-                    detected.quality.sharpnessScore >= 24 &&
-                    detected.quality.luminanceScore >= 26 &&
-                    detected.quality.luminanceScore <= 242;
+                    detected.quality.sharpnessScore >= 12 &&
+                    detected.quality.luminanceScore >= 18 &&
+                    detected.quality.luminanceScore <= 248;
 
                   if (!spatialQualityOk) {
                     setUiState({
@@ -610,12 +612,7 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                           )
                           .then((identRes) => {
                             if (finishedRef.current) return;
-                            if (
-                              identRes.status === 'NO_USER_FOUND' ||
-                              (!identRes.matched && !identRes.isProxy)
-                            ) {
-                              emitFailure('No User Found', true, false);
-                            } else if (identRes.isProxy) {
+                            if (identRes.isProxy) {
                               emitFailure(
                                 identRes.message ||
                                   'Proxy attempt rejected: Face does not match registered student.',
@@ -630,11 +627,28 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                                 message: `Identity Confirmed: ${identRes.studentName} (${identRes.matchedUsn}). Please blink naturally.`,
                               });
                             } else {
-                              identityCheckingRef.current = false;
+                              identifyAttemptsRef.current += 1;
+                              if (identifyAttemptsRef.current >= 4) {
+                                emitFailure(
+                                  identRes.message || 'No User Found: Face did not match enrolled student reference.',
+                                  true,
+                                  false
+                                );
+                              } else {
+                                setUiState({
+                                  phase: 'position',
+                                  message: `${identRes.message || 'Align face clearly...'} (${identifyAttemptsRef.current}/3)`,
+                                });
+                                setTimeout(() => {
+                                  identityCheckingRef.current = false;
+                                }, 700);
+                              }
                             }
                           })
                           .catch(() => {
-                            identityCheckingRef.current = false;
+                            setTimeout(() => {
+                              identityCheckingRef.current = false;
+                            }, 700);
                           });
                       } else {
                         identityCheckingRef.current = false;

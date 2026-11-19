@@ -197,12 +197,12 @@ export function trackFaceWithLandmarker(
   const areaRatio = (box.width * box.height) / (vw * vh);
 
   const centeredOk =
-    centerXRatio >= 0.16 &&
-    centerXRatio <= 0.84 &&
-    centerYRatio >= 0.14 &&
-    centerYRatio <= 0.86;
-  const sizeOk = areaRatio >= 0.035 && areaRatio <= 0.85;
-  const lightingOk = luminanceScore >= 26 && luminanceScore <= 242;
+    centerXRatio >= 0.10 &&
+    centerXRatio <= 0.90 &&
+    centerYRatio >= 0.08 &&
+    centerYRatio <= 0.92;
+  const sizeOk = areaRatio >= 0.02 && areaRatio <= 0.92;
+  const lightingOk = luminanceScore >= 18 && luminanceScore <= 248;
 
   return {
     faceCount: 1,

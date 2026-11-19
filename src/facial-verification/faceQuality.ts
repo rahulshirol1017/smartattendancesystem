@@ -9,13 +9,13 @@ import { FaceQualityMetrics } from '../shared/types.ts';
  */
 
 export const QUALITY_THRESHOLDS = {
-  minInterOcularPx: 36,
-  minLuminance: 26,
-  maxLuminance: 242,
-  minSharpnessVariance: 28,
-  maxAbsYawDeg: 24,
-  maxAbsPitchDeg: 22,
-  maxAbsRollDeg: 22,
+  minInterOcularPx: 22,
+  minLuminance: 18,
+  maxLuminance: 248,
+  minSharpnessVariance: 12,
+  maxAbsYawDeg: 30,
+  maxAbsPitchDeg: 26,
+  maxAbsRollDeg: 26,
 };
 
 function dist2D(a: { x: number; y: number }, b: { x: number; y: number }): number {
@@ -149,11 +149,11 @@ export function evaluateFaceQuality(params: {
   const { yawDeg, pitchDeg, rollDeg } = estimateHeadPoseDegrees(landmarks, vw, vh);
 
   const withinBounds = fivePointsPx.every(
-    (pt) => pt.x >= vw * 0.03 && pt.x <= vw * 0.97 && pt.y >= vh * 0.03 && pt.y <= vh * 0.97
+    (pt) => pt.x >= vw * 0.01 && pt.x <= vw * 0.99 && pt.y >= vh * 0.01 && pt.y <= vh * 0.99
   );
 
   let failureReason: string | null = null;
-  if (!withinBounds || boxPx.width < 60 || boxPx.height < 60) {
+  if (!withinBounds || boxPx.width < 40 || boxPx.height < 40) {
     failureReason = 'Keep your full face inside the frame.';
   } else if (interOcularPx < QUALITY_THRESHOLDS.minInterOcularPx) {
     failureReason = 'Move slightly closer to the camera.';

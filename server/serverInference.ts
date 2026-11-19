@@ -484,9 +484,9 @@ export function evaluateServerFaceQuality(
     failureReason = 'Partial or cropped face rejected.';
   } else if (interOcularPx < 22) {
     failureReason = 'Face resolution is too small / distant for reliable recognition.';
-  } else if (luminanceScore < 24 || luminanceScore > 244) {
+  } else if (luminanceScore < 18 || luminanceScore > 248) {
     failureReason = 'Lighting quality out of acceptable range (too dark or overexposed).';
-  } else if (sharpnessScore < 16) {
+  } else if (sharpnessScore < 10) {
     failureReason = 'Captured face frame is too blurry for biometric matching.';
   } else if (
     requireFrontal &&

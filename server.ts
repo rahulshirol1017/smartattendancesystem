@@ -4451,7 +4451,7 @@ async function startServer(): Promise<void> {
       if (faces.length !== 1) {
         throw new Error(`Sample ${i + 1}: Expected 1 clear face (found ${faces.length}). Please capture a single centered face.`);
       }
-      const qual = evaluateServerFaceQuality(frame, faces[0], true);
+      const qual = evaluateServerFaceQuality(frame, faces[0], false);
       if (!qual.passed) {
         throw new Error(`Sample ${i + 1} quality rejected: ${qual.failureReason}`);
       }
@@ -5423,7 +5423,7 @@ async function startServer(): Promise<void> {
           return;
         }
 
-        const qual = evaluateServerFaceQuality(frame, faces[0], true);
+        const qual = evaluateServerFaceQuality(frame, faces[0], false);
         res.json(qual);
       } catch (err) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Quality check failed.' });
