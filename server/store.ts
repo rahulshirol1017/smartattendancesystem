@@ -70,7 +70,7 @@ export class DataRepository {
   public async initialize(): Promise<void> {
     ensureSampleEvidenceFiles(this.uploadDir);
 
-    const mongoUri = process.env.MONGODB_URI?.trim();
+    const mongoUri = (process.env.MONGODB_URI || process.env.MONGO_URI)?.trim();
     if (mongoUri) {
       try {
         await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 5000 });

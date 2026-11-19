@@ -444,7 +444,7 @@ async function startServer(): Promise<void> {
     const sections = await repo.getSections();
     res.json({
       storageMode: repo.getStorageMode(),
-      mongoConfigured: Boolean(process.env.MONGODB_URI?.trim()),
+      mongoConfigured: Boolean((process.env.MONGODB_URI || process.env.MONGO_URI)?.trim()),
       demoPersonas: personas,
       sections: sections.filter((s) => s.status === 'Active'),
       institutionName: policy.institutionName,
