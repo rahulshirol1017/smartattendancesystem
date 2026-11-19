@@ -325,7 +325,8 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
   const handleBypassQr = useCallback(async () => {
     try {
       stopRearCamera();
-      setStatus('validating_qr');
+      setStatus('submitting');
+      setFlowStep('validating_qr');
       setStatusMessage('Initializing Facial Recognition (Bypass Mode)...');
       let sessId = 'dev-test-' + Date.now();
       let sessTok = 'dev-test-token-' + Date.now();
