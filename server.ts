@@ -475,28 +475,41 @@ async function startServer(): Promise<void> {
     });
   });
 
-  app.get('/api/auth/me', async (req: Request, res: Response) => {
-    const user = await extractUserFromRequest(req);
-    const personas = await repo.listDemoPersonas();
+  app.get('/api/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     res.json({
-      user,
-      storageMode: repo.getStorageMode(),
-      demoPersonas: personas,
+      user: req.user,
     });
   });
 
   app.post('/api/auth/login', async (req: Request, res: Response) => {
-    const { identifierOrEmail, password } = req.body as {
+    const { identifier, email, identifierOrEmail, usn, password } = req.body as {
+      identifier?: string;
+      email?: string;
       identifierOrEmail?: string;
+      usn?: string;
       password?: string;
     };
 
-    if (!identifierOrEmail || !password) {
+    const rawInput =
+      typeof identifier === 'string' && identifier.trim()
+        ? identifier.trim()
+        : typeof email === 'string' && email.trim()
+        ? email.trim()
+        : typeof identifierOrEmail === 'string' && identifierOrEmail.trim()
+        ? identifierOrEmail.trim()
+        : typeof usn === 'string' && usn.trim()
+        ? usn.trim()
+        : '';
+
+    if (!rawInput || typeof password !== 'string' || !password) {
       res.status(400).json({ error: 'Please enter both your USN/ID (or email) and password.' });
       return;
     }
 
-    const found = await repo.findUserByLogin(identifierOrEmail);
+    // Normalize email addresses before lookup (lowercase and trimmed); keep USN/ID trimmed
+    const lookupKey = rawInput.includes('@') ? rawInput.toLowerCase() : rawInput;
+
+    const found = await repo.findUserByLogin(lookupKey);
     if (!found) {
       res.status(401).json({ error: 'Invalid credentials. Check your USN/ID and password.' });
       return;

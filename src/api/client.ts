@@ -204,13 +204,33 @@ export const api = {
   },
 
   getSession(): Promise<SessionInfoPayload> {
-    return requestJson<SessionInfoPayload>('/api/auth/me');
+    return requestJson<{ user: UserProfile | null }>('/api/auth/me')
+      .then((data) => ({
+        user: data.user || null,
+        storageMode: 'mongodb' as const,
+        demoPersonas: [] as UserProfile[],
+      }))
+      .catch((err) => {
+        if (err instanceof ApiRequestError && err.status === 401) {
+          setStoredToken(null);
+          return {
+            user: null,
+            storageMode: 'mongodb' as const,
+            demoPersonas: [] as UserProfile[],
+          };
+        }
+        throw err;
+      });
   },
 
-  async login(identifierOrEmail: string, password: string): Promise<UserProfile> {
+  async login(loginInput: string, password: string): Promise<UserProfile> {
+    const isEmail = loginInput.includes('@');
+    const bodyPayload = isEmail
+      ? { email: loginInput.trim().toLowerCase(), password }
+      : { identifier: loginInput.trim(), password };
     const res = await requestJson<{ user: UserProfile; token: string }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ identifierOrEmail, password }),
+      body: JSON.stringify(bodyPayload),
     });
     setStoredToken(res.token);
     return res.user;
