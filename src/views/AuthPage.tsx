@@ -130,7 +130,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const handleRequestResetCode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!forgotEmail.trim()) {
-      setError('Please enter your university email address.');
+      setError('Please enter your university USN or registered email address.');
       return;
     }
     setError(null);
@@ -139,6 +139,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     try {
       const res = await api.forgotPassword(forgotEmail.trim());
       setSuccessMsg(res.message);
+      if ((res as any).devOtp) {
+        setForgotOtp((res as any).devOtp);
+      }
       setForgotStep('verify_code');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to request verification code.');
@@ -341,20 +344,20 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 {forgotStep === 'request_code' && (
                   <form onSubmit={handleRequestResetCode} className="space-y-4">
                     <p className="text-xs text-[#6B5A4C]">
-                      Enter your registered university email address. We will send a secure 6-digit verification code to reset your password.
+                      Enter your university USN or registered email address. We will send a secure 6-digit verification code to reset your password.
                     </p>
                     <div>
                       <label htmlFor="forgot-email" className="block text-xs font-medium text-[#241710] mb-1.5">
-                        University Email Address
+                        USN or Registered Email Address
                       </label>
                       <div className="relative">
                         <input
                           id="forgot-email"
-                          type="email"
+                          type="text"
                           required
                           value={forgotEmail}
                           onChange={(e) => setForgotEmail(e.target.value)}
-                          placeholder="e.g. 2vx24cb069@vtu.ac.in"
+                          placeholder="e.g. 2VX24CB069 or student@example.com"
                           className="w-full rounded border border-[#E3D2B4] bg-white pl-9 pr-3.5 py-2.5 text-sm text-[#241710] focus:border-[#165B33] focus:outline-none"
                         />
                         <Mail className="w-4 h-4 text-[#6B5A4C] absolute left-3 top-3" />
@@ -363,7 +366,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                     <button
                       type="submit"
                       disabled={busy}
-                      className="w-full rounded bg-[#165B33] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#104526] disabled:opacity-50 transition-colors"
+                      className="w-full rounded bg-[#165B33] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#104526] disabled:opacity-50 transition-colors cursor-pointer"
                     >
                       {busy ? 'Sending code…' : 'Send Verification Code'}
                     </button>

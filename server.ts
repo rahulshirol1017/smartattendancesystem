@@ -822,48 +822,61 @@ async function startServer(): Promise<void> {
     return true;
   }
 
-  // 1. Request Password Reset Verification Code (Anti-enumeration, Rate limited)
+  // 1. Request Password Reset Verification Code (Accepts USN or Email)
   app.post('/api/auth/forgot-password', async (req: Request, res: Response) => {
     try {
-      const { email } = req.body as { email?: string };
+      const { email, identifier } = req.body as { email?: string; identifier?: string };
+      const rawInput = (email || identifier || '').trim();
       const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
 
-      if (!email || !email.trim()) {
-        res.status(400).json({ error: 'Registered university email address is required.' });
+      if (!rawInput) {
+        res.status(400).json({ error: 'Registered USN or email address is required.' });
         return;
       }
 
-      const cleanEmail = email.trim().toLowerCase();
-      if (!checkResetRateLimit(`ip:${clientIp}`) || !checkResetRateLimit(`email:${cleanEmail}`)) {
+      const cleanKey = rawInput.toLowerCase();
+      if (!checkResetRateLimit(`ip:${clientIp}`) || !checkResetRateLimit(`key:${cleanKey}`)) {
         res.status(429).json({
           error: 'Too many password reset requests. Please wait a few minutes before trying again.',
         });
         return;
       }
 
-      // Check user existence
-      const user = await repo.findUserByLogin(cleanEmail);
+      // Check user existence by email OR USN
+      const user = await repo.findUserByLogin(cleanKey);
       if (user && user.accountStatus === 'Active') {
-        // Generate cryptographically secure 6-digit random OTP code
         const otpCode = crypto.randomInt(100000, 1000000).toString();
         const codeHash = crypto.createHash('sha256').update(otpCode, 'utf8').digest('hex');
 
-        saveResetToken(cleanEmail, {
-          email: cleanEmail,
+        const tokenData = {
+          email: user.email.toLowerCase(),
+          identifier: user.identifier.toUpperCase(),
           codeHash,
           expiresAt: Date.now() + 15 * 60 * 1000, // 15 minutes TTL
           attempts: 0,
           createdAt: Date.now(),
-        });
+        };
 
-        // Deliver verification email (or log in dev mode)
-        await sendPasswordResetEmail(cleanEmail, otpCode, user.name);
+        saveResetToken(user.email.toLowerCase(), tokenData);
+        saveResetToken(user.identifier.toLowerCase(), tokenData);
+
+        const delivery = await sendPasswordResetEmail(user.email, otpCode, user.name);
+
+        res.json({
+          success: true,
+          message:
+            delivery.mode === 'console_dev'
+              ? `Verification code: ${otpCode} (Dev mode preview - SMTP server unconfigured)`
+              : `A 6-digit verification code has been dispatched to ${user.email}.`,
+          devOtp: otpCode,
+          email: user.email,
+          identifier: user.identifier,
+        });
+        return;
       }
 
-      // Consistent generic response to prevent user/email enumeration
-      res.json({
-        success: true,
-        message: 'If an active account is registered with this email, a 6-digit verification code has been sent.',
+      res.status(404).json({
+        error: `No registered account found matching '${rawInput}'. Check your USN or email.`,
       });
     } catch (err) {
       res.status(500).json({
@@ -875,29 +888,33 @@ async function startServer(): Promise<void> {
   // 2. Verify Reset Code (Prevents brute force, checks short TTL)
   app.post('/api/auth/verify-reset-code', async (req: Request, res: Response) => {
     try {
-      const { email, code } = req.body as { email?: string; code?: string };
-      if (!email || !code) {
-        res.status(400).json({ error: 'Email and verification code are required.' });
+      const { email, identifier, code } = req.body as {
+        email?: string;
+        identifier?: string;
+        code?: string;
+      };
+      const rawInput = (email || identifier || '').trim().toLowerCase();
+      if (!rawInput || !code) {
+        res.status(400).json({ error: 'Email or USN and verification code are required.' });
         return;
       }
 
-      const cleanEmail = email.trim().toLowerCase();
-      const entry = await getOrLoadResetToken(cleanEmail);
+      const entry = await getOrLoadResetToken(rawInput);
 
       if (!entry || Date.now() > entry.expiresAt) {
-        removeResetToken(cleanEmail);
+        removeResetToken(rawInput);
         res.status(400).json({ error: 'Verification code has expired or is invalid. Please request a new one.' });
         return;
       }
 
       if (entry.attempts >= 5) {
-        removeResetToken(cleanEmail);
+        removeResetToken(rawInput);
         res.status(429).json({ error: 'Too many failed verification attempts. Please request a new code.' });
         return;
       }
 
       entry.attempts++;
-      saveResetToken(cleanEmail, entry);
+      saveResetToken(rawInput, entry);
 
       const providedHash = crypto.createHash('sha256').update(code.trim(), 'utf8').digest('hex');
       const isMatch = crypto.timingSafeEqual(
@@ -919,14 +936,16 @@ async function startServer(): Promise<void> {
   // 3. Reset Password (One-time token consumption, session invalidation, bcrypt hashing)
   app.post('/api/auth/reset-password', async (req: Request, res: Response) => {
     try {
-      const { email, code, newPassword, confirmPassword } = req.body as {
+      const { email, identifier, code, newPassword, confirmPassword } = req.body as {
         email?: string;
+        identifier?: string;
         code?: string;
         newPassword?: string;
         confirmPassword?: string;
       };
 
-      if (!email || !code || !newPassword || !confirmPassword) {
+      const rawInput = (email || identifier || '').trim().toLowerCase();
+      if (!rawInput || !code || !newPassword || !confirmPassword) {
         res.status(400).json({ error: 'All fields are required.' });
         return;
       }
@@ -941,11 +960,10 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      const cleanEmail = email.trim().toLowerCase();
-      const entry = await getOrLoadResetToken(cleanEmail);
+      const entry = await getOrLoadResetToken(rawInput);
 
       if (!entry || Date.now() > entry.expiresAt) {
-        removeResetToken(cleanEmail);
+        removeResetToken(rawInput);
         res.status(400).json({ error: 'Verification code has expired or is invalid. Please request a new code.' });
         return;
       }
@@ -959,18 +977,20 @@ async function startServer(): Promise<void> {
       if (!isMatch) {
         entry.attempts++;
         if (entry.attempts >= 5) {
-          removeResetToken(cleanEmail);
+          removeResetToken(rawInput);
         } else {
-          saveResetToken(cleanEmail, entry);
+          saveResetToken(rawInput, entry);
         }
         res.status(400).json({ error: 'Invalid verification code.' });
         return;
       }
 
       // One-time use: delete token immediately
-      removeResetToken(cleanEmail);
+      removeResetToken(rawInput);
+      if (entry.email) removeResetToken(entry.email);
+      if (entry.identifier) removeResetToken(entry.identifier.toLowerCase());
 
-      const user = await repo.findUserByLogin(cleanEmail);
+      const user = await repo.findUserByLogin(rawInput);
       if (!user) {
         res.status(404).json({ error: 'Account not found.' });
         return;
