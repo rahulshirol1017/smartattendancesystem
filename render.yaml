@@ -3,28 +3,37 @@ services:
     name: vtu-smart-attendance
     env: node
     plan: free
+    healthCheckPath: /health
     buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 3000
-      - key: JWT_SECRET
-        generateValue: true
       - key: MONGODB_URI
         sync: false
+      - key: JWT_SECRET
+        sync: false
       - key: BIOMETRIC_ENCRYPTION_KEY
-        generateValue: true
+        sync: false
       - key: VERIFICATION_SESSION_SECRET
-        generateValue: true
+        sync: false
       - key: PARENT_APP_AUTH_SECRET
-        generateValue: true
+        sync: false
       - key: ENROLLMENT_ADMIN_KEY
-        generateValue: true
+        sync: false
       - key: ARCFACE_COSINE_THRESHOLD
         value: "0.40"
       - key: APP_URL
         sync: false
       - key: PRIVATE_UPLOAD_DIR
         value: ".private_uploads"
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        value: "VTU Smart Attendance <no-reply@vtu.ac.in>"

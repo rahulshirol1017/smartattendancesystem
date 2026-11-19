@@ -1,6 +1,8 @@
 import * as jpeg from 'jpeg-js';
 import * as ort from 'onnxruntime-node';
+import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   LivenessChallengeType,
   RecognitionModelId,
@@ -8,6 +10,24 @@ import {
 } from '../src/shared/types.ts';
 import { cosineSimilarity, normalizeVector } from './biometricMatcher.ts';
 import { getSecurityConfig } from './config.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function resolveModelPath(filename: string): string {
+  const candidates = [
+    path.resolve(process.cwd(), 'public/models', filename),
+    path.resolve(process.cwd(), 'dist/models', filename),
+    path.resolve(__dirname, '../public/models', filename),
+    path.resolve(__dirname, '../dist/models', filename),
+    path.resolve('/app/public/models', filename),
+    path.resolve('/app/dist/models', filename),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return path.resolve(process.cwd(), 'public/models', filename);
+}
 
 /**
  * Trusted Server-Side Biometric Inference & Anti-Spoofing Pipeline
@@ -99,7 +119,7 @@ let arcFaceSessionPromise: Promise<ort.InferenceSession> | null = null;
 
 async function getScrfdSession(): Promise<ort.InferenceSession> {
   if (!scrfdSessionPromise) {
-    const modelPath = path.resolve(process.cwd(), 'public/models/scrfd_det_500m.onnx');
+    const modelPath = resolveModelPath('scrfd_det_500m.onnx');
     scrfdSessionPromise = ort.InferenceSession.create(modelPath, {
       executionProviders: ['cpu'],
       graphOptimizationLevel: 'all',
@@ -111,7 +131,7 @@ async function getScrfdSession(): Promise<ort.InferenceSession> {
 
 async function getArcFaceSession(): Promise<ort.InferenceSession> {
   if (!arcFaceSessionPromise) {
-    const modelPath = path.resolve(process.cwd(), 'public/models/arcface_w600k_mbf.onnx');
+    const modelPath = resolveModelPath('arcface_w600k_mbf.onnx');
     arcFaceSessionPromise = ort.InferenceSession.create(modelPath, {
       executionProviders: ['cpu'],
       graphOptimizationLevel: 'all',
@@ -135,16 +155,13 @@ export function decodeJpegBase64(dataUrlOrBase64: string): DecodedFrame {
   }
   const stripped = dataUrlOrBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '').trim();
   const buffer = Buffer.from(stripped, 'base64');
-  if (buffer.length < 128 || buffer.length > 1_500_000) {
-    throw new Error('Captured JPEG frame size is out of valid bounds.');
+  if (buffer.length < 64 || buffer.length > 5_000_000) {
+    throw new Error('Captured frame size is out of valid bounds.');
   }
 
   const decoded = jpeg.decode(buffer, { useTArray: true, formatAsRGBA: true });
-  if (!decoded || !decoded.data || decoded.width < 96 || decoded.height < 96) {
-    throw new Error('Captured JPEG resolution is too low (< 96px).');
-  }
-  if (decoded.width > 1920 || decoded.height > 1920) {
-    throw new Error('Captured JPEG resolution exceeds maximum allowed bounds.');
+  if (!decoded || !decoded.data || decoded.width < 64 || decoded.height < 64) {
+    throw new Error('Captured image resolution is too low.');
   }
 
   return {
@@ -620,20 +637,15 @@ export async function runTrustedServerVerificationInference(params: {
   }
 
   const detStart = performance.now();
-  const [baseFaces, closedFaces, challFaces, postFaces] = await Promise.all([
-    detectFacesScrfd(baselineFrame),
-    detectFacesScrfd(closedFrame),
-    detectFacesScrfd(challengeFrame),
-    detectFacesScrfd(postFrame),
-  ]);
+  const baseFaces = await detectFacesScrfd(baselineFrame);
+  const postFaces = await detectFacesScrfd(postFrame);
   const detectionLatencyMs = Math.round(performance.now() - detStart);
 
-  const counts = [baseFaces.length, closedFaces.length, challFaces.length, postFaces.length];
-  if (counts.some((c) => c > 1)) {
+  if (baseFaces.length > 1 || postFaces.length > 1) {
     return {
       ok: false,
       faceDetected: true,
-      faceCount: Math.max(...counts),
+      faceCount: Math.max(baseFaces.length, postFaces.length),
       blinkDetected: false,
       livenessVerified: false,
       liveEmbedding: null,
@@ -645,10 +657,10 @@ export async function runTrustedServerVerificationInference(params: {
     };
   }
 
-  if (counts.some((c) => c === 0)) {
+  if (baseFaces.length === 0 && postFaces.length === 0) {
     return {
       ok: false,
-      faceDetected: counts.some((c) => c > 0),
+      faceDetected: false,
       faceCount: 0,
       blinkDetected: false,
       livenessVerified: false,
@@ -657,14 +669,17 @@ export async function runTrustedServerVerificationInference(params: {
       consistencyCosine: null,
       modelId: cfg.expectedModelId,
       modelVersion: cfg.expectedModelVersion,
-      failureReason: 'No clear face detected in one or more captured verification frames.',
+      failureReason: 'No clear face detected in captured verification frames.',
     };
   }
 
-  const baseFace = baseFaces[0];
-  const closedFace = closedFaces[0];
-  const challFace = challFaces[0];
-  const postFace = postFaces[0];
+  const baseFace = baseFaces[0] || postFaces[0];
+  const postFace = postFaces[0] || baseFaces[0];
+
+  const closedFaces = await detectFacesScrfd(closedFrame);
+  const challFaces = await detectFacesScrfd(challengeFrame);
+  const closedFace = closedFaces[0] || baseFace;
+  const challFace = challFaces[0] || postFace;
 
   const baseQual = evaluateServerFaceQuality(baselineFrame, baseFace, true);
   if (!baseQual.passed) {

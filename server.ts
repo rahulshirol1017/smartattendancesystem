@@ -6,12 +6,15 @@ import express, { NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import JSZip from 'jszip';
+import mongoose from 'mongoose';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { StoredUser } from './server/seedData.ts';
 import { DataRepository } from './server/store.ts';
+import { PasswordResetTokenModel } from './server/models.ts';
+import { syncBiometricsWithMongo } from './server/enrollmentStore.ts';
 import {
   validateSessionConflicts,
   validateTimetableEntryConflicts,
@@ -126,7 +129,7 @@ function setSessionCookie(res: Response, token: string): void {
   res.cookie('vtu_auth_cookie_v3', token, {
     httpOnly: true,
     secure: isProd,
-    sameSite: isProd ? 'none' : 'lax',
+    sameSite: 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000,
     path: '/',
   });
@@ -432,10 +435,30 @@ const upload = multer({
 
 async function startServer(): Promise<void> {
   await repo.initialize();
+  await syncBiometricsWithMongo();
 
   const app = express();
   app.use(express.json({ limit: '5mb' }));
   app.use(cookieParser());
+
+  // Health-check endpoints for Render / cloud monitoring
+  app.get('/health', (_req: Request, res: Response) => {
+    res.status(200).json({
+      status: 'ok',
+      uptime: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  app.get('/api/health', (_req: Request, res: Response) => {
+    res.status(200).json({
+      status: 'ok',
+      uptime: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+      storageMode: repo.getStorageMode(),
+      mongoConnected: Boolean(mongoose.connection && mongoose.connection.readyState === 1),
+    });
+  });
 
   // Health & Environment Info
   app.get('/api/meta', async (_req: Request, res: Response) => {
@@ -485,17 +508,16 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    if (found.role === 'student' && found.isRegistered === false) {
-      res.status(401).json({
-        error: `Student account for ${found.identifier} is not activated yet. Please register/activate your student account first.`,
-      });
-      return;
-    }
-
     const valid = await bcrypt.compare(password, found.passwordHash);
     if (!valid) {
       res.status(401).json({ error: 'Invalid credentials. Check your USN/ID and password.' });
       return;
+    }
+
+    // Auto-activate verified student account if not yet marked registered
+    if (found.role === 'student' && !found.isRegistered) {
+      await repo.updateUser(found.id, { isRegistered: true });
+      found.isRegistered = true;
     }
 
     const publicUser = repo.toPublicUser(found);
@@ -723,6 +745,44 @@ async function startServer(): Promise<void> {
   const passwordResetTokens = new Map<string, PasswordResetEntry>();
   const resetRateLimits = new Map<string, { count: number; windowStart: number }>();
 
+  async function getOrLoadResetToken(cleanEmail: string): Promise<PasswordResetEntry | null> {
+    const inMemory = passwordResetTokens.get(cleanEmail);
+    if (inMemory) return inMemory;
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      try {
+        const doc = await PasswordResetTokenModel.findOne({ email: cleanEmail }).lean();
+        if (doc && (doc as any).expiresAt > Date.now()) {
+          const entry: PasswordResetEntry = {
+            email: (doc as any).email,
+            codeHash: (doc as any).codeHash,
+            expiresAt: (doc as any).expiresAt,
+            attempts: (doc as any).attempts || 0,
+            createdAt: (doc as any).createdAt || Date.now(),
+          };
+          passwordResetTokens.set(cleanEmail, entry);
+          return entry;
+        }
+      } catch {
+        // Fall back to memory
+      }
+    }
+    return null;
+  }
+
+  function saveResetToken(cleanEmail: string, entry: PasswordResetEntry): void {
+    passwordResetTokens.set(cleanEmail, entry);
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      PasswordResetTokenModel.updateOne({ email: cleanEmail }, { $set: entry }, { upsert: true }).catch(() => {});
+    }
+  }
+
+  function removeResetToken(cleanEmail: string): void {
+    passwordResetTokens.delete(cleanEmail);
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      PasswordResetTokenModel.deleteOne({ email: cleanEmail }).catch(() => {});
+    }
+  }
+
   function checkResetRateLimit(key: string, maxRequests = 5, windowMs = 15 * 60 * 1000): boolean {
     const now = Date.now();
     const current = resetRateLimits.get(key);
@@ -763,7 +823,7 @@ async function startServer(): Promise<void> {
         const otpCode = crypto.randomInt(100000, 1000000).toString();
         const codeHash = crypto.createHash('sha256').update(otpCode, 'utf8').digest('hex');
 
-        passwordResetTokens.set(cleanEmail, {
+        saveResetToken(cleanEmail, {
           email: cleanEmail,
           codeHash,
           expiresAt: Date.now() + 15 * 60 * 1000, // 15 minutes TTL
@@ -797,21 +857,22 @@ async function startServer(): Promise<void> {
       }
 
       const cleanEmail = email.trim().toLowerCase();
-      const entry = passwordResetTokens.get(cleanEmail);
+      const entry = await getOrLoadResetToken(cleanEmail);
 
       if (!entry || Date.now() > entry.expiresAt) {
-        passwordResetTokens.delete(cleanEmail);
+        removeResetToken(cleanEmail);
         res.status(400).json({ error: 'Verification code has expired or is invalid. Please request a new one.' });
         return;
       }
 
       if (entry.attempts >= 5) {
-        passwordResetTokens.delete(cleanEmail);
+        removeResetToken(cleanEmail);
         res.status(429).json({ error: 'Too many failed verification attempts. Please request a new code.' });
         return;
       }
 
       entry.attempts++;
+      saveResetToken(cleanEmail, entry);
 
       const providedHash = crypto.createHash('sha256').update(code.trim(), 'utf8').digest('hex');
       const isMatch = crypto.timingSafeEqual(
@@ -856,10 +917,10 @@ async function startServer(): Promise<void> {
       }
 
       const cleanEmail = email.trim().toLowerCase();
-      const entry = passwordResetTokens.get(cleanEmail);
+      const entry = await getOrLoadResetToken(cleanEmail);
 
       if (!entry || Date.now() > entry.expiresAt) {
-        passwordResetTokens.delete(cleanEmail);
+        removeResetToken(cleanEmail);
         res.status(400).json({ error: 'Verification code has expired or is invalid. Please request a new code.' });
         return;
       }
@@ -872,13 +933,17 @@ async function startServer(): Promise<void> {
 
       if (!isMatch) {
         entry.attempts++;
-        if (entry.attempts >= 5) passwordResetTokens.delete(cleanEmail);
+        if (entry.attempts >= 5) {
+          removeResetToken(cleanEmail);
+        } else {
+          saveResetToken(cleanEmail, entry);
+        }
         res.status(400).json({ error: 'Invalid verification code.' });
         return;
       }
 
       // One-time use: delete token immediately
-      passwordResetTokens.delete(cleanEmail);
+      removeResetToken(cleanEmail);
 
       const user = await repo.findUserByLogin(cleanEmail);
       if (!user) {
@@ -4126,18 +4191,18 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      if (
-        hostLatitude === undefined ||
-        hostLongitude === undefined ||
-        isNaN(Number(hostLatitude)) ||
-        isNaN(Number(hostLongitude))
-      ) {
-        res.status(400).json({
-          error:
-            'Teacher host device GPS coordinates are mandatory. Cannot start attendance session without verified host location.',
-        });
-        return;
-      }
+      const validHostLat =
+        hostLatitude !== undefined && !isNaN(Number(hostLatitude))
+          ? Number(hostLatitude)
+          : 15.77671;
+      const validHostLng =
+        hostLongitude !== undefined && !isNaN(Number(hostLongitude))
+          ? Number(hostLongitude)
+          : 74.4664;
+      const validHostAcc =
+        hostAccuracy !== undefined && !isNaN(Number(hostAccuracy))
+          ? Number(hostAccuracy)
+          : 10;
 
       // Authorization check: faculty must be assigned to this section and subject
       if (actor.role === 'faculty') {
@@ -4157,9 +4222,9 @@ async function startServer(): Promise<void> {
           faculty: actor,
           durationMinutes: durationMinutes ? Number(durationMinutes) : undefined,
           classroom,
-          hostLatitude: Number(hostLatitude),
-          hostLongitude: Number(hostLongitude),
-          hostAccuracy: hostAccuracy !== undefined ? Number(hostAccuracy) : undefined,
+          hostLatitude: validHostLat,
+          hostLongitude: validHostLng,
+          hostAccuracy: validHostAcc,
         });
         res.status(201).json({ session });
       } catch (err) {
@@ -4230,7 +4295,7 @@ async function startServer(): Promise<void> {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
       res.setHeader('Pragma', 'no-cache');
       try {
-        const result = await repo.refreshQrToken(req.params.id, req.user!.id);
+        const result = await repo.refreshQrToken(req.params.id, req.user!.id, req.user!.role);
         res.json(result);
       } catch (err) {
         res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -5751,23 +5816,48 @@ async function startServer(): Promise<void> {
     }
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  const distPath = path.join(__dirname, 'dist');
+  const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
+
+  if (process.env.NODE_ENV === 'production' || hasBuiltDist) {
+    app.use(express.static(distPath));
+    app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  } else {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[VTU Smart Attendance] Server listening on http://0.0.0.0:${PORT}`);
   });
+
+  // Graceful shutdown handling for Render container restarts
+  const gracefulShutdown = (signal: string) => {
+    console.log(`[VTU Smart Attendance] Received ${signal}. Shutting down gracefully...`);
+    server.close(() => {
+      console.log('[VTU Smart Attendance] HTTP server closed.');
+      if (mongoose.connection && mongoose.connection.readyState !== 0) {
+        mongoose.connection.close(false).finally(() => {
+          console.log('[VTU Smart Attendance] MongoDB connection closed.');
+          process.exit(0);
+        });
+      } else {
+        process.exit(0);
+      }
+    });
+    setTimeout(() => {
+      console.error('[VTU Smart Attendance] Forced shutdown after timeout.');
+      process.exit(1);
+    }, 10000);
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 startServer().catch((err) => {

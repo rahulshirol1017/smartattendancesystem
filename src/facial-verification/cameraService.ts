@@ -42,22 +42,37 @@ export async function startFrontCamera(
       },
       audio: false,
     });
-  } catch (err) {
-    const domErr = err as DOMException;
-    if (domErr?.name === 'NotAllowedError' || domErr?.name === 'PermissionDeniedError') {
-      throw new Error(
-        'Camera permission was denied. Allow camera access in your browser settings and reload.'
-      );
+  } catch (initialErr) {
+    // Graceful fallback for mobile browsers that reject strict frameRate/resolution constraints
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user' },
+        audio: false,
+      });
+    } catch {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      } catch (err) {
+        const domErr = err as DOMException;
+        if (domErr?.name === 'NotAllowedError' || domErr?.name === 'PermissionDeniedError') {
+          throw new Error(
+            'Camera permission was denied. Allow camera access in your browser settings and reload.'
+          );
+        }
+        if (domErr?.name === 'NotFoundError' || domErr?.name === 'DevicesNotFoundError') {
+          throw new Error('No camera device was detected on this device.');
+        }
+        if (domErr?.name === 'NotReadableError' || domErr?.name === 'TrackStartError') {
+          throw new Error(
+            'Camera hardware is busy in another application. Close other camera apps and retry.'
+          );
+        }
+        throw new Error(domErr?.message || 'Unable to start device front camera.');
+      }
     }
-    if (domErr?.name === 'NotFoundError' || domErr?.name === 'DevicesNotFoundError') {
-      throw new Error('No front camera device was detected on this device.');
-    }
-    if (domErr?.name === 'NotReadableError' || domErr?.name === 'TrackStartError') {
-      throw new Error(
-        'Camera hardware is busy in another application. Close other camera apps and retry.'
-      );
-    }
-    throw new Error(domErr?.message || 'Unable to start device front camera.');
   }
 
   videoEl.srcObject = stream;

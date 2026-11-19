@@ -8,6 +8,8 @@ import {
 } from '../src/shared/types.ts';
 import { computeCentroidDescriptor, validateDescriptorVector } from './biometricMatcher.ts';
 import { getSecurityConfig } from './config.ts';
+import { BiometricEnrollmentModel } from './models.ts';
+import mongoose from 'mongoose';
 
 /**
  * AES-256-GCM Encrypted Scalable Biometric Reference Store
@@ -98,6 +100,63 @@ function saveStore(store: EncryptedStoreFile): void {
   const tmpPath = `${storePath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmpPath, storePath);
+
+  // Asynchronously replicate encrypted biometric reference to MongoDB Atlas for persistence
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    const subjects = Object.values(store.subjects);
+    if (subjects.length > 0) {
+      Promise.all(
+        subjects.map((s) =>
+          BiometricEnrollmentModel.updateOne(
+            { subjectId: s.subjectId },
+            { $set: s },
+            { upsert: true }
+          ).catch((err) =>
+            console.warn(`[BiometricStore] Atlas backup error for ${s.subjectId}:`, err.message)
+          )
+        )
+      ).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Synchronizes encrypted biometric templates with MongoDB Atlas at startup.
+ * Ensures persistent biometrics survive cloud ephemeral container restarts.
+ */
+export async function syncBiometricsWithMongo(): Promise<void> {
+  if (!mongoose.connection || mongoose.connection.readyState !== 1) return;
+  try {
+    const mongoDocs = await BiometricEnrollmentModel.find({}).lean();
+    const diskStore = loadStore();
+    let mutated = false;
+
+    if (mongoDocs && mongoDocs.length > 0) {
+      // Rehydrate local store from persistent cloud database
+      for (const doc of mongoDocs) {
+        const item = doc as unknown as StoredEncryptedSubject;
+        if (item.subjectId && !diskStore.subjects[item.subjectId]) {
+          diskStore.subjects[item.subjectId] = item;
+          mutated = true;
+        }
+      }
+    } else {
+      // Seed MongoDB Atlas with existing local templates if Atlas is fresh
+      const localSubjects = Object.values(diskStore.subjects);
+      if (localSubjects.length > 0) {
+        await BiometricEnrollmentModel.insertMany(localSubjects);
+        console.log(`[BiometricStore] Seeded ${localSubjects.length} biometric templates into MongoDB Atlas.`);
+      }
+    }
+
+    if (mutated) {
+      const storePath = getStorePath();
+      fs.writeFileSync(storePath, JSON.stringify(diskStore, null, 2), { encoding: 'utf8', mode: 0o600 });
+      console.log(`[BiometricStore] Synchronized ${Object.keys(diskStore.subjects).length} biometric templates from MongoDB Atlas.`);
+    }
+  } catch (err) {
+    console.warn('[BiometricStore] MongoDB synchronization warning:', err instanceof Error ? err.message : String(err));
+  }
 }
 
 function decryptSubjectRecord(stored: StoredEncryptedSubject): EnrolledSubjectRecord {
@@ -282,5 +341,8 @@ export function deleteEnrolledSubject(subjectId: string): boolean {
   }
   delete store.subjects[cleanId];
   saveStore(store);
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    BiometricEnrollmentModel.deleteOne({ subjectId: cleanId }).catch(() => {});
+  }
   return true;
 }

@@ -56,6 +56,7 @@ const UserSchema = new Schema(
       index: true,
     },
     isDemo: { type: Boolean, default: false, index: true },
+    isRegistered: { type: Boolean, default: false },
     tokenVersion: { type: Number, default: 0 },
   },
   { timestamps: true }
@@ -568,4 +569,44 @@ export const AttendanceSubmissionAttemptModel =
 export const RandomInClassVerificationModel =
   mongoose.models.RandomInClassVerification ||
   mongoose.model('RandomInClassVerification', RandomInClassVerificationSchema);
+
+const BiometricEnrollmentSchema = new Schema(
+  {
+    subjectId: { type: String, required: true, unique: true, index: true },
+    displayName: { type: String },
+    modelId: { type: String, required: true },
+    modelVersion: { type: String, required: true },
+    embeddingDim: { type: Number, default: 512 },
+    encryptedVectors: {
+      iv: { type: String, required: true },
+      authTag: { type: String, required: true },
+      ciphertext: { type: String, required: true },
+    },
+    samples: { type: Schema.Types.Mixed, default: [] },
+    consentConfirmed: { type: Boolean, default: true },
+    consentRecordedAt: { type: String },
+    updatedAt: { type: String },
+  },
+  { timestamps: true }
+);
+
+export const BiometricEnrollmentModel =
+  mongoose.models.BiometricEnrollment ||
+  mongoose.model('BiometricEnrollment', BiometricEnrollmentSchema);
+
+const PasswordResetTokenSchema = new Schema(
+  {
+    email: { type: String, required: true, unique: true, index: true },
+    codeHash: { type: String, required: true },
+    expiresAt: { type: Number, required: true, index: true },
+    attempts: { type: Number, default: 0 },
+    createdAt: { type: Number, default: () => Date.now() },
+  },
+  { timestamps: true }
+);
+
+export const PasswordResetTokenModel =
+  mongoose.models.PasswordResetToken ||
+  mongoose.model('PasswordResetToken', PasswordResetTokenSchema);
+
 

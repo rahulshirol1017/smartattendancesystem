@@ -51,6 +51,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [regUsn, setRegUsn] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
+  const [regConfirmPassword, setRegConfirmPassword] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [showRegConfirmPassword, setShowRegConfirmPassword] = useState(false);
   const [regCollege, setRegCollege] = useState('VTU Campus, Jnana Sangama, Belagavi');
   const [regSectionId, setRegSectionId] = useState(sections[0]?.id || '');
   const [regProgramme, setRegProgramme] = useState(
@@ -98,6 +101,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     }
     if (regPassword.length < 8) {
       setError('Password must be at least 8 characters long.');
+      return;
+    }
+    if (regPassword !== regConfirmPassword) {
+      setError('Password and confirm password do not match.');
       return;
     }
     setError(null);
@@ -704,16 +711,55 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   >
                     Password (minimum 8 characters)
                   </label>
-                  <input
-                    id="reg-pass"
-                    type="password"
-                    required
-                    minLength={8}
-                    value={regPassword}
-                    onChange={(e) => setRegPassword(e.target.value)}
-                    placeholder="Create password"
-                    className="w-full rounded border border-[#E3D2B4] bg-white px-3 py-2 text-sm focus:border-[#165B33] focus:outline-none"
-                  />
+                  <div className="relative">
+                    <input
+                      id="reg-pass"
+                      type={showRegPassword ? 'text' : 'password'}
+                      required
+                      minLength={8}
+                      value={regPassword}
+                      onChange={(e) => setRegPassword(e.target.value)}
+                      placeholder="Create password"
+                      className="w-full rounded border border-[#E3D2B4] bg-white pl-3.5 pr-10 py-2 text-sm focus:border-[#165B33] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRegPassword((prev) => !prev)}
+                      aria-label={showRegPassword ? 'Hide password' : 'Show password'}
+                      className="absolute inset-y-0 right-0 px-3 text-[#6B5A4C] hover:text-[#241710] flex items-center"
+                    >
+                      {showRegPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="reg-confirm-pass"
+                    className="block text-xs font-medium text-[#241710] mb-1"
+                  >
+                    Confirm Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="reg-confirm-pass"
+                      type={showRegConfirmPassword ? 'text' : 'password'}
+                      required
+                      minLength={8}
+                      value={regConfirmPassword}
+                      onChange={(e) => setRegConfirmPassword(e.target.value)}
+                      placeholder="Confirm password"
+                      className="w-full rounded border border-[#E3D2B4] bg-white pl-3.5 pr-10 py-2 text-sm focus:border-[#165B33] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRegConfirmPassword((prev) => !prev)}
+                      aria-label={showRegConfirmPassword ? 'Hide password' : 'Show password'}
+                      className="absolute inset-y-0 right-0 px-3 text-[#6B5A4C] hover:text-[#241710] flex items-center"
+                    >
+                      {showRegConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="pt-1">
