@@ -1,5 +1,5 @@
 # Stage 1: Build frontend assets
-FROM node:22-alpine AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -9,8 +9,8 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# Stage 2: Production runtime
-FROM node:22-alpine AS runner
+# Stage 2: Production runtime (Debian glibc required for onnxruntime-node native bindings)
+FROM node:22-bookworm-slim AS runner
 
 WORKDIR /app
 
