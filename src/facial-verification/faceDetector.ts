@@ -5,7 +5,7 @@ import {
   computeFaceSharpness,
   evaluateFaceQuality,
 } from './faceQuality.ts';
-import { getFaceLandmarker } from './modelLoader.ts';
+import { getFaceLandmarker, switchToCpuDelegate } from './modelLoader.ts';
 
 /**
  * Real-Time MediaPipe 478-Point Tracking & JPEG Evidence Frame Capture
@@ -65,6 +65,8 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
+let isSwitchingDelegate = false;
+
 export function trackFaceWithLandmarker(
   videoEl: HTMLVideoElement,
   timestampMs: number,
@@ -75,17 +77,52 @@ export function trackFaceWithLandmarker(
     return null;
   }
 
-  const landmarker = getFaceLandmarker();
+  let landmarker = getFaceLandmarker();
   if (!landmarker) {
     return null;
   }
 
-  let result;
+  let result: any = null;
+
+  // 1. First attempt: Direct detectForVideo on video element
   try {
     result = landmarker.detectForVideo(videoEl, timestampMs);
-  } catch (err) {
-    console.warn('[FaceDetector] detectForVideo failed:', err);
-    return null;
+  } catch (err: any) {
+    console.warn('[FaceDetector] detectForVideo on videoEl failed:', err?.message || err);
+    // If WebGL context lost or GPU runtime error, trigger CPU delegate recovery
+    const errMsg = String(err?.message || err);
+    if (!isSwitchingDelegate && (errMsg.includes('WebGL') || errMsg.includes('GL_') || errMsg.includes('context lost'))) {
+      isSwitchingDelegate = true;
+      switchToCpuDelegate().finally(() => {
+        isSwitchingDelegate = false;
+      });
+    }
+  }
+
+  // 2. Second attempt: On mobile browsers (Safari on iOS or Android Chrome),
+  // passing HTMLVideoElement directly to WebGL can return an empty texture (faceCount === 0)
+  // or fail because the video frame hasn't copied to the GPU layer yet.
+  // Rendering to an offscreen 2D canvas guarantees an uncompressed, accessible pixel buffer.
+  const initialFaceCount = result?.faceLandmarks?.length || 0;
+  if (initialFaceCount === 0 && scratchCanvas && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+    try {
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      if (scratchCanvas.width !== vw || scratchCanvas.height !== vh) {
+        scratchCanvas.width = vw;
+        scratchCanvas.height = vh;
+      }
+      const sCtx = scratchCanvas.getContext('2d', { willReadFrequently: true });
+      if (sCtx) {
+        sCtx.drawImage(videoEl, 0, 0, vw, vh);
+        landmarker = getFaceLandmarker();
+        if (landmarker) {
+          result = landmarker.detectForVideo(scratchCanvas, timestampMs);
+        }
+      }
+    } catch (canvasErr) {
+      console.warn('[FaceDetector] Canvas fallback inference error:', canvasErr);
+    }
   }
 
   const faceCount = result?.faceLandmarks?.length || 0;
@@ -136,7 +173,7 @@ export function trackFaceWithLandmarker(
   const leftEyePoints = MP_LEFT_EYE_EAR_INDICES.map(toPoint);
   const rightEyePoints = MP_RIGHT_EYE_EAR_INDICES.map(toPoint);
   const contourPoints = MP_CONTOUR_SUBSET_INDICES.map(toPoint);
-  const allPoints = landmarks.map((pt) => ({ x: pt.x * vw, y: pt.y * vh }));
+  const allPoints = landmarks.map((pt: any) => ({ x: pt.x * vw, y: pt.y * vh }));
 
   const subjectRightEyeCenter = avgPoints([33, 133, 159, 145]);
   const subjectLeftEyeCenter = avgPoints([362, 263, 386, 374]);
@@ -255,19 +292,19 @@ export function captureEvidenceFrameJpeg(
 
   const vw = videoEl.videoWidth;
   const vh = videoEl.videoHeight;
-  const scale = Math.min(1, maxDimension / Math.max(vw, vh));
-  const targetW = Math.max(120, Math.round(vw * scale));
-  const targetH = Math.max(120, Math.round(vh * scale));
+  const scale = Math.min(1.0, maxDimension / Math.max(vw, vh));
+  const targetW = Math.round(vw * scale);
+  const targetH = Math.round(vh * scale);
 
   if (!captureCanvasSingleton) {
     captureCanvasSingleton = document.createElement('canvas');
   }
-  captureCanvasSingleton.width = targetW;
-  captureCanvasSingleton.height = targetH;
-
-  const ctx = captureCanvasSingleton.getContext('2d');
+  const canvas = captureCanvasSingleton;
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return null;
 
   ctx.drawImage(videoEl, 0, 0, targetW, targetH);
-  return captureCanvasSingleton.toDataURL('image/jpeg', jpegQuality);
+  return canvas.toDataURL('image/jpeg', jpegQuality);
 }

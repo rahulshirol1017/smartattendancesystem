@@ -357,7 +357,7 @@ export function buildInitialSeedData(): SeedDatabaseBundle {
       id: 'stu-csbsb-069',
       name: 'RAHUL SHIROL',
       identifier: '2VX24CB069',
-      email: '2vx24cb069@vtu.ac.in',
+      email: 'rshirol958@gmail.com',
       role: 'student',
       college: 'VTU Campus, Jnana Sangama, Belagavi',
       department: 'CSBS',

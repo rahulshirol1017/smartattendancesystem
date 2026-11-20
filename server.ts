@@ -5901,10 +5901,28 @@ async function startServer(): Promise<void> {
   const distPath = path.join(__dirname, 'dist');
   const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
 
-  app.use(express.static(publicPath));
+  const staticOptions = {
+    setHeaders: (res: Response, filePath: string) => {
+      const isStaticModelOrAsset =
+        /\.(wasm|onnx|task|bin|js|css|svg|png|jpg|jpeg|ico|woff2?)$/i.test(filePath) ||
+        filePath.includes('/mediapipe/') ||
+        filePath.includes('/models/') ||
+        filePath.includes('/ort/');
+      if (isStaticModelOrAsset) {
+        // Cache static AI models and assets for 30 days to ensure instantaneous loading on mobile
+        res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      }
+      if (filePath.endsWith('.wasm')) {
+        res.setHeader('Content-Type', 'application/wasm');
+      }
+    },
+  };
+
+  app.use(express.static(publicPath, staticOptions));
 
   if (process.env.NODE_ENV === 'production' || hasBuiltDist) {
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, staticOptions));
     app.get('*', (req: Request, res: Response) => {
       const p = req.path;
       if (

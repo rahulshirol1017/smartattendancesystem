@@ -1,7 +1,7 @@
 /**
  * Camera Service Module
- * Handles orientation-aware front-camera initialization, permission error translation,
- * lighting luminance assessment, and deterministic track cleanup.
+ * Handles mobile-compatible, orientation-aware front-camera initialization,
+ * permission error translation, lighting luminance assessment, and deterministic cleanup.
  */
 
 export interface CameraStartResult {
@@ -19,6 +19,14 @@ export function isCameraApiSupported(): boolean {
   );
 }
 
+function isMobileDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isTouch = typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1;
+  const isMobileUa = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+  return isMobileUa || (isTouch && (typeof window !== 'undefined' && window.innerWidth < 1024));
+}
+
 export async function startFrontCamera(
   videoEl: HTMLVideoElement
 ): Promise<CameraStartResult> {
@@ -30,67 +38,129 @@ export async function startFrontCamera(
 
   const isPortraitViewport =
     typeof window !== 'undefined' && window.innerHeight > window.innerWidth;
+  const isMobile = isMobileDevice();
 
   let stream: MediaStream;
+
+  // Optimized mobile camera constraints:
+  // Mobile devices overheat and drop frames when negotiating 4K or unconstrained resolutions.
+  // 720p or 640p provides crisp, full 478-landmark tracking with optimal 30 FPS inference.
+  const idealWidth = isMobile
+    ? (isPortraitViewport ? 540 : 720)
+    : (isPortraitViewport ? 720 : 1280);
+  const idealHeight = isMobile
+    ? (isPortraitViewport ? 720 : 540)
+    : (isPortraitViewport ? 1280 : 720);
+
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'user' },
-        width: { ideal: isPortraitViewport ? 720 : 1280 },
-        height: { ideal: isPortraitViewport ? 1280 : 720 },
+        width: { ideal: idealWidth, max: 1280 },
+        height: { ideal: idealHeight, max: 1280 },
         frameRate: { ideal: 30, min: 15 },
       },
       audio: false,
     });
   } catch (initialErr) {
-    // Graceful fallback for mobile browsers that reject strict frameRate/resolution constraints
+    console.warn('[CameraService] Tier-1 constraints rejected, trying relaxed user facingMode...', initialErr);
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
+        video: {
+          facingMode: 'user',
+          width: { ideal: idealWidth },
+          height: { ideal: idealHeight },
+        },
         audio: false,
       });
     } catch {
       try {
+        console.warn('[CameraService] Tier-2 constraints rejected, trying basic facingMode: user...');
         stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: { facingMode: 'user' },
           audio: false,
         });
-      } catch (err) {
-        const domErr = err as DOMException;
-        if (domErr?.name === 'NotAllowedError' || domErr?.name === 'PermissionDeniedError') {
-          throw new Error(
-            'Camera permission was denied. Allow camera access in your browser settings and reload.'
-          );
+      } catch {
+        try {
+          console.warn('[CameraService] Tier-3 constraints rejected, falling back to bare video: true...');
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        } catch (err) {
+          const domErr = err as DOMException;
+          if (domErr?.name === 'NotAllowedError' || domErr?.name === 'PermissionDeniedError') {
+            throw new Error(
+              'Camera permission was denied. Allow camera access in your browser settings and reload.'
+            );
+          }
+          if (domErr?.name === 'NotFoundError' || domErr?.name === 'DevicesNotFoundError') {
+            throw new Error('No camera device was detected on this device.');
+          }
+          if (domErr?.name === 'NotReadableError' || domErr?.name === 'TrackStartError') {
+            throw new Error(
+              'Camera hardware is busy in another application. Close other camera apps and retry.'
+            );
+          }
+          throw new Error(domErr?.message || 'Unable to start device front camera.');
         }
-        if (domErr?.name === 'NotFoundError' || domErr?.name === 'DevicesNotFoundError') {
-          throw new Error('No camera device was detected on this device.');
-        }
-        if (domErr?.name === 'NotReadableError' || domErr?.name === 'TrackStartError') {
-          throw new Error(
-            'Camera hardware is busy in another application. Close other camera apps and retry.'
-          );
-        }
-        throw new Error(domErr?.message || 'Unable to start device front camera.');
       }
     }
   }
 
-  videoEl.srcObject = stream;
-  videoEl.setAttribute('playsinline', 'true');
+  // Critical configuration for iOS Safari & Android Chrome:
+  // Must set muted, playsInline, autoPlay on DOM element BEFORE assigning srcObject
   videoEl.muted = true;
+  videoEl.playsInline = true;
+  videoEl.autoplay = true;
+  videoEl.setAttribute('autoplay', 'true');
+  videoEl.setAttribute('playsinline', 'true');
+  videoEl.setAttribute('webkit-playsinline', 'true');
+  videoEl.setAttribute('muted', 'true');
+  videoEl.srcObject = stream;
 
+  // Robustly wait until video metadata AND actual decoded frames are available
   await new Promise<void>((resolve, reject) => {
-    const onLoaded = () => {
+    let resolved = false;
+
+    const timeoutId = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        console.warn('[CameraService] Camera ready check timed out after 4s; proceeding with current state');
+        resolve();
+      }
+    }, 4000);
+
+    const checkReady = () => {
+      if (resolved) return;
+      if (
+        videoEl.videoWidth > 0 &&
+        videoEl.videoHeight > 0 &&
+        (videoEl.readyState >= 2 || videoEl.currentTime > 0)
+      ) {
+        resolved = true;
+        clearTimeout(timeoutId);
+        resolve();
+      }
+    };
+
+    videoEl.onloadedmetadata = () => {
       videoEl
         .play()
-        .then(() => resolve())
-        .catch(reject);
+        .then(checkReady)
+        .catch((playErr) => {
+          console.warn('[CameraService] video.play() warning:', playErr);
+          checkReady();
+        });
     };
-    if (videoEl.readyState >= 2) {
-      onLoaded();
-    } else {
-      videoEl.onloadedmetadata = onLoaded;
-    }
+    videoEl.onloadeddata = checkReady;
+    videoEl.onplaying = checkReady;
+    videoEl.ontimeupdate = checkReady;
+
+    videoEl
+      .play()
+      .then(checkReady)
+      .catch(() => {});
   });
 
   const videoTrack = stream.getVideoTracks()[0];
@@ -99,8 +169,8 @@ export async function startFrontCamera(
   return {
     stream,
     deviceLabel: videoTrack?.label || 'Front Camera',
-    width: settings?.width || videoEl.videoWidth || 1280,
-    height: settings?.height || videoEl.videoHeight || 720,
+    width: settings?.width || videoEl.videoWidth || idealWidth,
+    height: settings?.height || videoEl.videoHeight || idealHeight,
   };
 }
 
@@ -115,6 +185,7 @@ export function stopCameraStream(
   }
   if (videoEl) {
     videoEl.srcObject = null;
+    videoEl.pause?.();
   }
 }
 

@@ -26,6 +26,7 @@ import { QRScannerModal } from './components/QRScannerModal.tsx';
 import { FacultyQRAttendanceView } from './views/FacultyQRAttendanceView.tsx';
 import { AdminAttendanceMonitoringView } from './views/AdminAttendanceMonitoringView.tsx';
 import { AdminFacialModelView } from './views/AdminFacialModelView.tsx';
+import { loadPretrainedFaceModels } from './facial-verification/modelLoader.ts';
 
 function getDomainRoutePath(role: UserRole, section: NavigationSection): string {
   const slug = role === 'admin' && section === 'dashboard' ? 'overview' : section;
@@ -128,6 +129,19 @@ export default function App() {
       syncDomainUrl(workspace.user.role, activeSection);
     }
   }, [workspace, activeSection, syncDomainUrl]);
+
+  // Pre-warm facial recognition models in the background when a student is in the dashboard
+  // This ensures instant (<10ms) zero-wait landmark tracking when the camera modal opens
+  useEffect(() => {
+    if (workspace?.user?.role === 'student') {
+      const timer = setTimeout(() => {
+        loadPretrainedFaceModels('/models').catch((err) => {
+          console.warn('[Preload] Face models background warmup:', err);
+        });
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [workspace?.user?.role]);
 
   const handleSectionNavigate = useCallback(
     (sec: NavigationSection) => {

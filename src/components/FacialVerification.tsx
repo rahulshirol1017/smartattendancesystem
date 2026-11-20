@@ -5,6 +5,7 @@ import {
   BlinkLivenessTracker,
   Point2D,
   TrackedFaceFrame,
+  areFaceModelsLoaded,
   captureEvidenceFrameJpeg,
   loadPretrainedFaceModels,
   measureFrameLuminance,
@@ -115,6 +116,8 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
   const identityCheckedRef = useRef<boolean>(false);
   const identityCheckingRef = useRef<boolean>(false);
   const identifyAttemptsRef = useRef<number>(0);
+  const isInferringRef = useRef<boolean>(false);
+  const [isPortraitVideo, setIsPortraitVideo] = useState<boolean>(false);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
@@ -609,7 +612,13 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
     lastMpTimestampRef.current = 0;
     blinkTrackerRef.current.reset(latestPropsRef.current.challengeType);
 
-    setUiState({ phase: 'initializing', message: 'Position your face inside the frame.' });
+    const isModelsReady = areFaceModelsLoaded();
+    setUiState({
+      phase: 'initializing',
+      message: isModelsReady
+        ? 'Starting front camera...'
+        : 'Starting camera & initializing facial recognition...',
+    });
 
     (async () => {
       try {
@@ -625,6 +634,9 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
           return;
         }
         streamRef.current = started.stream;
+        if (started.height > started.width) {
+          setIsPortraitVideo(true);
+        }
         setUiState({ phase: 'position', message: 'Position your face inside the frame.' });
 
         if (!scratchCanvasRef.current) {
@@ -635,11 +647,20 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
           if (cancelled || finishedRef.current) return;
 
           if (rafNow - lastFrameTimeRef.current >= TRACKING_INTERVAL_MS) {
+            // Guard against overlapping inference loops on fast 90/120Hz mobile displays
+            if (isInferringRef.current) {
+              if (!cancelled && !finishedRef.current) {
+                rafRef.current = window.requestAnimationFrame(runFrame);
+              }
+              return;
+            }
+
             lastFrameTimeRef.current = rafNow;
             const video = videoRef.current;
             const scratch = scratchCanvasRef.current;
 
-            if (video && scratch && video.readyState >= 2) {
+            if (video && scratch && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+              isInferringRef.current = true;
               try {
                 const mpTimestamp = Math.max(
                   Math.round(rafNow),
@@ -812,6 +833,8 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                 }
               } catch (frameErr) {
                 console.warn('[VTU Verification] runFrame error:', frameErr);
+              } finally {
+                isInferringRef.current = false;
               }
             }
           }
@@ -870,13 +893,16 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
 
   return (
     <div className="w-full max-w-xl mx-auto flex flex-col rounded-md border border-[#E3D2B4] bg-[#FFFDF8] overflow-hidden shadow-sm">
-      {/* Natural Camera Field of View (No digital zoom, responsive framing, 1:1 landmark alignment) */}
+      {/* Natural Camera Field of View (Responsive portrait/landscape framing, 1:1 landmark alignment) */}
       <div
         ref={viewportRef}
-        className="relative w-full aspect-[4/3] sm:aspect-[16/10] bg-[#1a120c] overflow-hidden flex items-center justify-center"
+        className={`relative w-full ${
+          isPortraitVideo ? 'aspect-[3/4] max-h-[68vh]' : 'aspect-[4/3] sm:aspect-[16/10]'
+        } bg-[#1a120c] overflow-hidden flex items-center justify-center`}
       >
         <video
           ref={videoRef}
+          autoPlay
           playsInline
           muted
           className={`w-full h-full object-contain -scale-x-100 ${
@@ -888,6 +914,7 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
 
         <canvas
           ref={overlayCanvasRef}
+          data-testid="face-overlay-canvas"
           className="pointer-events-none absolute inset-0 w-full h-full"
         />
 
@@ -927,6 +954,7 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
           <XCircle className="w-4 h-4 text-[#B42318] shrink-0" />
         )}
         <span
+          data-testid="face-status-text"
           className={`text-sm font-medium ${
             uiState.phase === 'success'
               ? 'text-[#165B33]'

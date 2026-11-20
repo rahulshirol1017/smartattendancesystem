@@ -35,7 +35,7 @@ async function runTests() {
   const repo = new DataRepository(LOCAL_DB_PATH, UPLOAD_DIR);
   await repo.initialize();
 
-  const studentUser = await repo.findUserByLogin('2vx24cb069@vtu.ac.in');
+  const studentUser = await repo.findUserByLogin('rshirol958@gmail.com');
   assert(Boolean(studentUser), 'Found real enrolled student 2VX24CB069 in database');
 
   const facultyUser = await repo.findUserByLogin('rohit.kaliwal@vtu.ac.in');
@@ -209,7 +209,7 @@ async function runTests() {
   // TEST 8: Forgot Password Flow (Rate Limiting, Verification & Reset)
   // =========================================================================
   console.log('\n--- Test 8: Forgot Password Complete Flow ---');
-  const targetEmail = '2vx24cb069@vtu.ac.in';
+  const targetEmail = 'rshirol958@gmail.com';
   const initialUser = await repo.findUserByLogin(targetEmail);
   const oldHash = initialUser!.passwordHash;
   const initialTokenVersion = initialUser!.tokenVersion || 0;

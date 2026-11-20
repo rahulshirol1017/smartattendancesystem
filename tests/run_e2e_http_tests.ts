@@ -170,7 +170,7 @@ async function runE2ETests() {
     body: {
       name: 'RAHUL SHIROL',
       identifier: '2VX24CB069',
-      email: '2vx24cb069@vtu.ac.in',
+      email: 'rshirol958@gmail.com',
       password: 'RahulPassword2026!',
     },
   });
