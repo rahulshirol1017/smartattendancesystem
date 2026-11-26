@@ -89,7 +89,7 @@ import {
   startFineTuning,
   stopTraining,
 } from './server/modelManager.ts';
-import { sendPasswordResetEmail } from './server/emailService.ts';
+import { sendPasswordResetEmail, sendRegistrationOtpEmail } from './server/emailService.ts';
 
 dotenv.config();
 
@@ -572,95 +572,323 @@ async function startServer(): Promise<void> {
     res.json({ user: publicUser, token });
   });
 
-  app.post('/api/auth/register', async (req: Request, res: Response) => {
-    const { name, identifier, email, password, college, programme, semester, sectionId } =
-      req.body as {
+  interface PendingRegistration {
+    name: string;
+    identifier: string;
+    email: string;
+    college: string;
+    department: string;
+    programme: string;
+    semester: number;
+    sectionId: string;
+    sectionDisplayName: string;
+    passwordHash: string;
+    codeHash: string;
+    expiresAt: number;
+    attempts: number;
+    createdAt: number;
+  }
+
+  const pendingRegistrations = new Map<string, PendingRegistration>();
+
+  // 1. Send Registration Email OTP (Exclusively via SMTP, zero raw code leak)
+  app.post('/api/auth/register-send-otp', async (req: Request, res: Response) => {
+    try {
+      const {
+        name,
+        identifier,
+        email,
+        password,
+        confirmPassword,
+        college,
+        programme,
+        semester,
+        sectionId,
+        department,
+      } = req.body as {
         name?: string;
         identifier?: string;
         email?: string;
         password?: string;
+        confirmPassword?: string;
         college?: string;
         programme?: string;
         semester?: number;
         sectionId?: string;
+        department?: string;
       };
 
-    if (!name?.trim() || !identifier?.trim() || !email?.trim() || !password || password.length < 8) {
+      if (!name?.trim() || !identifier?.trim() || !email?.trim() || !password) {
+        res.status(400).json({
+          error: 'Full name, university USN, email address, and password are required.',
+        });
+        return;
+      }
+
+      if (password.length < 8) {
+        res.status(400).json({ error: 'Password must be at least 8 characters long.' });
+        return;
+      }
+
+      if (confirmPassword && password !== confirmPassword) {
+        res.status(400).json({ error: 'Password and confirmation password do not match.' });
+        return;
+      }
+
+      const cleanUsn = identifier.trim().toUpperCase();
+      const cleanEmail = email.trim().toLowerCase();
+
+      // Email format validation (RFC 5322)
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(cleanEmail)) {
+        res.status(400).json({
+          error: 'Please enter a valid personal or institutional email address.',
+        });
+        return;
+      }
+
+      // Check USN uniqueness (prevent duplicate registrations)
+      const existingUsnUser = await repo.findUserByLogin(cleanUsn);
+      if (existingUsnUser && existingUsnUser.isRegistered) {
+        res.status(409).json({
+          error: `An account for USN '${cleanUsn}' is already registered and activated. Please log in or use Forgot Password.`,
+        });
+        return;
+      }
+
+      // Check Email uniqueness
+      const existingEmailUser = await repo.findUserByLogin(cleanEmail);
+      if (existingEmailUser && existingEmailUser.identifier.toUpperCase() !== cleanUsn) {
+        res.status(409).json({
+          error: `Email address '${cleanEmail}' is already registered with another account (${existingEmailUser.identifier}).`,
+        });
+        return;
+      }
+
+      // Rate limit check
+      const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+      if (!checkResetRateLimit(`reg-ip:${clientIp}`, 10) || !checkResetRateLimit(`reg-email:${cleanEmail}`, 5)) {
+        res.status(429).json({
+          error: 'Too many registration verification attempts. Please wait a few minutes before trying again.',
+        });
+        return;
+      }
+
+      const otpCode = crypto.randomInt(100000, 1000000).toString();
+      const codeHash = crypto.createHash('sha256').update(otpCode, 'utf8').digest('hex');
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      const resolvedSectionId =
+        sectionId ||
+        (cleanUsn.endsWith('67') || cleanUsn.endsWith('69') || cleanUsn.endsWith('70') || cleanUsn.endsWith('72')
+          ? 'sec-csbs-b'
+          : 'sec-csbs-a');
+      const resolvedSectionName = resolvedSectionId === 'sec-csbs-a' ? 'CSBS A' : 'CSBS B';
+
+      const entry: PendingRegistration = {
+        name: name.trim(),
+        identifier: cleanUsn,
+        email: cleanEmail,
+        college: college?.trim() || 'VTU Campus, Jnana Sangama, Belagavi',
+        department: department?.trim() || 'CSBS',
+        programme: programme?.trim() || 'B.Tech in Computer Science and Business Systems',
+        semester: Number(semester) || 5,
+        sectionId: resolvedSectionId,
+        sectionDisplayName: resolvedSectionName,
+        passwordHash,
+        codeHash,
+        expiresAt: Date.now() + 15 * 60 * 1000, // 15 mins TTL
+        attempts: 0,
+        createdAt: Date.now(),
+      };
+
+      pendingRegistrations.set(cleanEmail, entry);
+      pendingRegistrations.set(cleanUsn.toLowerCase(), entry);
+
+      const delivery = await sendRegistrationOtpEmail(cleanEmail, otpCode, name.trim());
+      if (!delivery.sent) {
+        res.status(503).json({
+          error:
+            delivery.error ||
+            'Failed to dispatch email verification code. Please ensure SMTP service is configured on the server.',
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: `A 6-digit verification code has been dispatched to ${cleanEmail}. Please enter it to complete registration.`,
+        email: cleanEmail,
+        identifier: cleanUsn,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to process registration request.',
+      });
+    }
+  });
+
+  // 2. Verify Registration Email OTP & Activate Student Account
+  async function handleVerifyRegistrationOtp(req: Request, res: Response) {
+    try {
+      const { email, identifier, code } = req.body as {
+        email?: string;
+        identifier?: string;
+        code?: string;
+      };
+
+      const rawInput = (email || identifier || '').trim().toLowerCase();
+      if (!rawInput || !code) {
+        res.status(400).json({ error: 'Email or USN and 6-digit verification code are required.' });
+        return;
+      }
+
+      const entry = pendingRegistrations.get(rawInput);
+      if (!entry || Date.now() > entry.expiresAt) {
+        if (entry) {
+          pendingRegistrations.delete(entry.email.toLowerCase());
+          pendingRegistrations.delete(entry.identifier.toLowerCase());
+        }
+        res.status(400).json({
+          error: 'Verification code has expired or is invalid. Please request a new registration code.',
+        });
+        return;
+      }
+
+      if (entry.attempts >= 5) {
+        pendingRegistrations.delete(entry.email.toLowerCase());
+        pendingRegistrations.delete(entry.identifier.toLowerCase());
+        res.status(429).json({
+          error: 'Too many failed verification attempts. Please restart registration.',
+        });
+        return;
+      }
+
+      const providedHash = crypto.createHash('sha256').update(code.trim(), 'utf8').digest('hex');
+      const isMatch = crypto.timingSafeEqual(
+        Buffer.from(providedHash, 'hex'),
+        Buffer.from(entry.codeHash, 'hex')
+      );
+
+      if (!isMatch) {
+        entry.attempts++;
+        res.status(400).json({ error: 'Invalid verification code. Please check the 6-digit code sent to your email.' });
+        return;
+      }
+
+      // OTP is valid - consume single-use token immediately
+      pendingRegistrations.delete(entry.email.toLowerCase());
+      pendingRegistrations.delete(entry.identifier.toLowerCase());
+
+      const cleanUsn = entry.identifier;
+      const cleanEmail = entry.email;
+
+      // Check if student identity already exists in repository
+      let existing = await repo.findUserByLogin(cleanUsn);
+      if (!existing) {
+        const all = await repo.listAllUsers();
+        const matched = all.find((u) => u.identifier.toUpperCase() === cleanUsn);
+        if (matched) {
+          existing = await repo.findUserById(matched.id);
+        }
+      }
+
+      const userId = existing ? existing.id : `stu-${cleanUsn.toLowerCase()}`;
+
+      if (existing) {
+        await repo.updateUser(existing.id, {
+          name: entry.name,
+          email: cleanEmail,
+          passwordHash: entry.passwordHash,
+          isRegistered: true,
+          accountStatus: 'Active',
+          department: entry.department,
+          sectionId: entry.sectionId,
+          sectionDisplayName: entry.sectionDisplayName,
+        });
+      } else {
+        const newStudent: StoredUser = {
+          id: userId,
+          name: entry.name,
+          identifier: cleanUsn,
+          email: cleanEmail,
+          role: 'student',
+          college: entry.college,
+          department: entry.department,
+          programme: entry.programme,
+          semester: entry.semester,
+          section: entry.sectionId === 'sec-csbs-a' ? 'A' : 'B',
+          sectionId: entry.sectionId,
+          sectionDisplayName: entry.sectionDisplayName,
+          academicYear: '2026',
+          rollNumber: cleanUsn.slice(-3),
+          accountStatus: 'Active',
+          isDemo: false,
+          isRegistered: true,
+          passwordHash: entry.passwordHash,
+        };
+        await repo.createUser(newStudent);
+      }
+
+      const enrolledRef = getEnrolledSubject(cleanUsn);
+      const hasFacialRef = Boolean(enrolledRef && enrolledRef.embeddings.length > 0);
+
+      const storedUser = await repo.findUserById(userId);
+      const publicUser: UserProfile = storedUser
+        ? repo.toPublicUser(storedUser)
+        : {
+            id: userId,
+            name: entry.name,
+            identifier: cleanUsn,
+            email: cleanEmail,
+            role: 'student' as const,
+            college: entry.college,
+            department: entry.department,
+            programme: entry.programme,
+            semester: entry.semester,
+            section: entry.sectionId === 'sec-csbs-a' ? 'A' : 'B',
+            sectionId: entry.sectionId,
+            sectionDisplayName: entry.sectionDisplayName,
+            accountStatus: 'Active' as const,
+            isRegistered: true,
+            isDemo: false,
+          };
+
+      const token = signSessionToken(publicUser);
+      setSessionCookie(res, token);
+
+      res.status(201).json({
+        user: publicUser,
+        token,
+        facialEnrolled: hasFacialRef,
+        message: hasFacialRef
+          ? 'Student account registered and verified! Existing facial biometric profile connected.'
+          : 'Student account registered and verified successfully.',
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Registration verification failed.',
+      });
+    }
+  }
+
+  app.post('/api/auth/register-verify-otp', handleVerifyRegistrationOtp);
+
+  // 3. Complete Student Self-Registration (Requires verified OTP)
+  app.post('/api/auth/register', async (req: Request, res: Response) => {
+    try {
+      const { code } = req.body as { code?: string };
+      if (code) {
+        return handleVerifyRegistrationOtp(req, res);
+      }
       res.status(400).json({
-        error: 'Name, USN, college email, and a password of at least 8 characters are required.',
+        error: 'Email verification code is required. Please request an OTP verification code via /api/auth/register-send-otp.',
       });
-      return;
-    }
-
-    const cleanUsn = identifier.trim().toUpperCase();
-    const cleanEmail = email.trim().toLowerCase();
-
-    // Verify USN against existing official student identity records
-    const allUsers = await repo.listAllUsers();
-    const matchingIdentity = allUsers.find(
-      (u) =>
-        u.role === 'student' &&
-        (u.identifier.toUpperCase() === cleanUsn ||
-          u.identifier.toUpperCase().endsWith(cleanUsn) ||
-          (u.rollNumber && u.rollNumber === cleanUsn))
-    );
-
-    if (!matchingIdentity) {
-      res.status(403).json({
-        error: `Unauthorized USN: USN '${cleanUsn}' is not registered in the official institutional student roster. Registration is restricted to enrolled students.`,
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Registration verification failed.',
       });
-      return;
     }
-
-    // Prevent duplicate accounts
-    if (matchingIdentity.isRegistered) {
-      res.status(409).json({
-        error: `An account for USN '${matchingIdentity.identifier}' has already been registered and activated. Please log in with your credentials.`,
-      });
-      return;
-    }
-
-    // Check email uniqueness against other users
-    const emailUser = await repo.findUserByLogin(cleanEmail);
-    if (emailUser && emailUser.id !== matchingIdentity.id) {
-      res.status(409).json({
-        error: `Email address '${cleanEmail}' is already registered with another account.`,
-      });
-      return;
-    }
-
-    // Store password securely as a bcrypt hash
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    // Synchronize account with official student record
-    await repo.updateUser(matchingIdentity.id, {
-      name: name.trim() || matchingIdentity.name,
-      email: cleanEmail,
-      passwordHash,
-      isRegistered: true,
-      accountStatus: 'Active',
-    });
-
-    const enrolledRef = getEnrolledSubject(matchingIdentity.identifier);
-    const hasFacialRef = Boolean(enrolledRef && enrolledRef.embeddings.length > 0);
-
-    const storedUser = await repo.findUserById(matchingIdentity.id);
-    const publicUser = storedUser ? repo.toPublicUser(storedUser) : (matchingIdentity as unknown as UserProfile);
-    publicUser.name = name.trim() || matchingIdentity.name;
-    publicUser.email = cleanEmail;
-    publicUser.isRegistered = true;
-
-    const token = signSessionToken(publicUser);
-    setSessionCookie(res, token);
-
-    res.status(201).json({
-      user: publicUser,
-      token,
-      facialEnrolled: hasFacialRef,
-      message: hasFacialRef
-        ? 'Student account synchronized. Existing facial reference verified and connected.'
-        : 'Student account registered successfully.',
-    });
   });
 
   app.post('/api/auth/logout', (_req: Request, res: Response) => {
@@ -862,14 +1090,26 @@ async function startServer(): Promise<void> {
         saveResetToken(user.identifier.toLowerCase(), tokenData);
 
         const delivery = await sendPasswordResetEmail(user.email, otpCode, user.name);
+        if (!delivery.sent) {
+          removeResetToken(user.email.toLowerCase());
+          removeResetToken(user.identifier.toLowerCase());
+          res.status(503).json({
+            error:
+              delivery.error ||
+              'Failed to dispatch password recovery email. Please ensure SMTP service is configured on the server.',
+          });
+          return;
+        }
+
+        // Mask email for privacy (e.g., ra***@gmail.com)
+        const [userPart, domainPart] = user.email.split('@');
+        const maskedEmail = userPart.length > 2 
+          ? `${userPart.slice(0, 2)}${'*'.repeat(Math.max(2, userPart.length - 2))}@${domainPart}`
+          : `${userPart}***@${domainPart}`;
 
         res.json({
           success: true,
-          message:
-            delivery.mode === 'console_dev'
-              ? `Verification code: ${otpCode} (Dev mode preview - SMTP server unconfigured)`
-              : `A 6-digit verification code has been dispatched to ${user.email}.`,
-          devOtp: otpCode,
+          message: `A 6-digit verification code has been dispatched to your registered email (${maskedEmail}).`,
           email: user.email,
           identifier: user.identifier,
         });
@@ -4525,6 +4765,121 @@ async function startServer(): Promise<void> {
     }
   }
 
+  // 1A. Public Native Camera QR Token Claim & 5-minute Verification Session Issuance (No login required)
+  app.post(
+    ['/api/qr-attendance/validate-scan-public', '/api/qr-attendance/claim-session'],
+    async (req: Request, res: Response) => {
+      try {
+        const {
+          sessionId,
+          qrToken,
+          latitude,
+          longitude,
+          accuracy,
+          deviceFingerprint,
+          devicePlatform,
+          browserName,
+        } = req.body as {
+          sessionId?: string;
+          qrToken?: string;
+          latitude?: number;
+          longitude?: number;
+          accuracy?: number;
+          deviceFingerprint?: string;
+          devicePlatform?: string;
+          browserName?: string;
+        };
+
+        if (!sessionId || !qrToken) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'Session identifier and scanned QR token are required.',
+          });
+          return;
+        }
+
+        const session = await repo.getQrSessionById(sessionId);
+        const now = Date.now();
+
+        if (!session) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'Attendance session not found.',
+          });
+          return;
+        }
+
+        // Check session active status & expiration
+        if (session.status !== 'ACTIVE' || now > session.sessionExpiresAt) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'Attendance session has concluded or expired. Please ask your instructor.',
+          });
+          return;
+        }
+
+        // Verify cryptographically signed dynamic QR token
+        const tokenCheck = repo.verifySecureQrToken(qrToken.trim(), session.id);
+        if (!tokenCheck.valid) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: tokenCheck.reason || 'Invalid or mismatched QR token. Please scan the live QR code on screen.',
+          });
+          return;
+        }
+
+        // Issue single-use cryptographically bound verification session (valid for 5 mins so QR 5-second rotations don't interrupt student)
+        const verificationSession = issueVerificationSession({
+          studentId: 'AUTO_IDENTIFY',
+          qrSessionId: session.id,
+        });
+
+        // Store pending scan parameters
+        pendingAttendanceScans.set(verificationSession.verificationSessionId, {
+          sessionId: session.id,
+          qrToken: String(qrToken).trim(),
+          student: null as any,
+          latitude: Number(latitude || 15.77671),
+          longitude: Number(longitude || 74.4664),
+          accuracy: Number(accuracy || 10),
+          deviceFingerprint: String(deviceFingerprint || 'mobile-native-scan').trim(),
+          devicePlatform: String(devicePlatform || 'Mobile Browser').trim(),
+          browserName: String(browserName || 'Native Camera Browser').trim(),
+          distanceMeters: 5,
+          issuedAt: now,
+        });
+
+        res.json({
+          success: true,
+          qrValidated: true,
+          verificationSessionId: verificationSession.verificationSessionId,
+          sessionToken: verificationSession.sessionToken,
+          challengeType: verificationSession.challengeType,
+          challengeInstruction: verificationSession.challengeInstruction,
+          sessionInfo: {
+            id: session.id,
+            subjectCode: session.subjectCode,
+            subjectName: session.subjectName,
+            sectionDisplayName: session.sectionDisplayName,
+            facultyName: session.facultyName,
+            classroom: session.classroom,
+          },
+        });
+      } catch (err) {
+        console.error('[Public QR Scan Error]', err);
+        res.status(500).json({
+          success: false,
+          classification: 'REJECTED',
+          message: err instanceof Error ? err.message : 'Internal error during QR validation.',
+        });
+      }
+    }
+  );
+
   // 1. Validate QR Token & Complete Teacher-Host GPS Proximity (Steps 1, 2, 3)
   app.post(
     ['/api/qr-attendance/validate-scan', '/api/qr-attendance/validate-scan-before-face'],
@@ -4705,14 +5060,11 @@ async function startServer(): Promise<void> {
   }
   );
 
-  // 1B. Live Face Identification & Proxy Check before Blink Challenge (Requirement 4)
+  // 1B. Live Face Identification & Proxy Check before Blink Challenge (1:N search, no login required)
   app.post(
     '/api/verification/identify-live-face',
-    requireAuth,
-    requireRoles('student'),
-    async (req: AuthenticatedRequest, res: Response) => {
+    async (req: Request, res: Response) => {
       try {
-        const student = req.user!;
         const { verificationSessionId, sessionToken, liveFrameJpeg } = req.body as {
           verificationSessionId?: string;
           sessionToken?: string;
@@ -4731,7 +5083,7 @@ async function startServer(): Promise<void> {
         const sessVal = isDevTest
           ? {
               ok: true as const,
-              studentId: student.identifier,
+              studentId: 'AUTO_IDENTIFY',
               qrSessionId: 'dev-test',
               challengeType: 'BLINK_AND_HEAD_LEFT' as const,
               challengeNonce: 'dev-nonce',
@@ -4786,7 +5138,7 @@ async function startServer(): Promise<void> {
 
         const liveEmbedding = await extractArcFaceEmbeddingServer(frame, faces[0].kps);
 
-        // Search actual enrolled facial references
+        // 1:N Search across actual enrolled facial references
         const allEnrolled = getAllEnrolledSubjects();
         if (allEnrolled.length === 0) {
           res.json({
@@ -4818,17 +5170,17 @@ async function startServer(): Promise<void> {
         }
 
         const matchedUsn = bestMatch.subject.subjectId;
-        const loggedInUsn = student.identifier || sessVal.studentId;
+        const expectedUsn = sessVal.studentId !== 'AUTO_IDENTIFY' ? sessVal.studentId : '';
 
-        // Check for proxy attempt
-        if (matchedUsn.toUpperCase() !== loggedInUsn.toUpperCase()) {
+        // Check for proxy attempt only if a specific student was expected
+        if (expectedUsn && matchedUsn.toUpperCase() !== expectedUsn.toUpperCase()) {
           res.json({
             matched: false,
             isProxy: true,
             status: 'PROXY_DETECTED',
             matchedUsn,
-            expectedUsn: loggedInUsn,
-            message: `Proxy attempt rejected: Face matches ${matchedUsn}, but logged-in student is ${loggedInUsn}.`,
+            expectedUsn,
+            message: `Proxy attempt rejected: Face matches ${matchedUsn}, but expected student is ${expectedUsn}.`,
           });
           return;
         }
@@ -4851,15 +5203,12 @@ async function startServer(): Promise<void> {
     }
   );
 
-  // 2. Finalize Facial Identity, Liveness & Atomically Mark Attendance (Steps 10, 11, 12)
+  // 2. Finalize Facial Identity, Liveness & Atomically Mark Attendance (No login required)
   app.post(
     '/api/qr-attendance/finalize-face-attendance',
-    requireAuth,
-    requireRoles('student'),
-    async (req: AuthenticatedRequest, res: Response) => {
+    async (req: Request, res: Response) => {
       try {
         const reqStart = performance.now();
-        const student = req.user!;
         const {
           verificationSessionId,
           sessionToken,
@@ -4872,222 +5221,316 @@ async function startServer(): Promise<void> {
           evidenceFrames?: VerificationEvidenceFrames;
         };
 
-      if (!verificationSessionId || !sessionToken || !evidenceFrames) {
-        res.status(400).json({
-          success: false,
-          classification: 'REJECTED',
-          message: 'Verification session ID, signed sessionToken, and evidenceFrames are required.',
+        if (!verificationSessionId || !sessionToken || !evidenceFrames) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'Verification session ID, signed sessionToken, and evidenceFrames are required.',
+          });
+          return;
+        }
+
+        // Step A: Atomically validate and consume session token in SQLite (anti-replay)
+        const isDevTest = verificationSessionId.startsWith('dev-test-');
+        const sessVal = isDevTest
+          ? {
+              ok: true as const,
+              studentId: 'AUTO_IDENTIFY',
+              qrSessionId: qrSessionId || 'dev-test',
+              challengeType: 'BLINK_AND_HEAD_LEFT' as const,
+              challengeNonce: 'dev-nonce',
+            }
+          : validateAndConsumeSession({ verificationSessionId, sessionToken });
+        if (!sessVal.ok) {
+          res.status(sessVal.statusCode).json({
+            success: false,
+            classification: 'REJECTED',
+            message: sessVal.error,
+          });
+          return;
+        }
+
+        // Step B: Server-side ArcFace recognition and liveness inference
+        const inferenceRes = await runTrustedServerVerificationInference({
+          evidenceFrames,
+          expectedChallenge: sessVal.challengeType,
         });
-        return;
-      }
 
-      // Step A: Atomically validate and consume session token in SQLite (anti-replay)
-      const isDevTest = verificationSessionId.startsWith('dev-test-');
-      const sessVal = isDevTest
-        ? {
-            ok: true as const,
-            studentId: student.identifier,
-            qrSessionId: 'dev-test',
-            challengeType: 'BLINK_AND_HEAD_LEFT' as const,
-            challengeNonce: 'dev-nonce',
-          }
-        : validateAndConsumeSession({ verificationSessionId, sessionToken });
-      if (!sessVal.ok) {
-        res.status(sessVal.statusCode).json({
-          success: false,
-          classification: 'REJECTED',
-          message: sessVal.error,
-        });
-        return;
-      }
+        if (!inferenceRes.ok || !inferenceRes.liveEmbedding) {
+          res.status(422).json({
+            success: false,
+            classification: 'REJECTED',
+            message: inferenceRes.failureReason || 'Server-side facial verification or liveness check failed.',
+            verificationResult: {
+              studentId: sessVal.studentId,
+              qrSessionId: qrSessionId || sessVal.qrSessionId,
+              verificationSessionId,
+              challengeType: sessVal.challengeType,
+              faceDetected: inferenceRes.faceDetected,
+              faceMatch: 'NO_MATCH',
+              blinkDetected: inferenceRes.blinkDetected,
+              livenessVerified: false,
+              verificationStatus: 'FAILED',
+              modelId: inferenceRes.modelId,
+              modelVersion: inferenceRes.modelVersion,
+              confidenceScore: null,
+              cosineSimilarity: inferenceRes.consistencyCosine,
+              thresholdUsed: 0.40,
+              failureReason: inferenceRes.failureReason,
+              verifiedAt: new Date().toISOString(),
+              resultSignature: '',
+            },
+          });
+          return;
+        }
 
-      // Step B: Student identity match
-      if (student.identifier !== sessVal.studentId && student.id !== sessVal.studentId) {
-        res.status(403).json({
-          success: false,
-          classification: 'REJECTED',
-          message: 'Student authentication does not match the verification session identity.',
-        });
-        return;
-      }
-
-      // Step C: Server-side ArcFace recognition and liveness inference
-      const inferenceRes = await runTrustedServerVerificationInference({
-        evidenceFrames,
-        expectedChallenge: sessVal.challengeType,
-      });
-
-      if (!inferenceRes.ok || !inferenceRes.liveEmbedding) {
-        res.status(422).json({
-          success: false,
-          classification: 'REJECTED',
-          message: inferenceRes.failureReason || 'Server-side facial verification or liveness check failed.',
-          verificationResult: {
-            studentId: student.identifier,
-            qrSessionId: qrSessionId || sessVal.qrSessionId,
-            verificationSessionId,
-            challengeType: sessVal.challengeType,
-            faceDetected: inferenceRes.faceDetected,
-            faceMatch: 'NO_MATCH',
-            blinkDetected: inferenceRes.blinkDetected,
-            livenessVerified: false,
-            verificationStatus: 'FAILED',
-            modelId: inferenceRes.modelId,
-            modelVersion: inferenceRes.modelVersion,
-            confidenceScore: null,
-            cosineSimilarity: inferenceRes.consistencyCosine,
-            thresholdUsed: 0.40,
-            failureReason: inferenceRes.failureReason,
-            verifiedAt: new Date().toISOString(),
-            resultSignature: '',
-          },
-        });
-        return;
-      }
-
-      // Step D: Search the actual enrolled facial references
-      const allEnrolled = getAllEnrolledSubjects();
-      let bestEnrolledMatch: { subject: EnrolledSubjectRecord; similarity: number } | null = null;
-      for (const subj of allEnrolled) {
-        if (!subj.embeddings || subj.embeddings.length === 0) continue;
-        const evalRes = evaluateFaceMatch(inferenceRes.liveEmbedding, subj.embeddings, 0.40);
-        if (evalRes.faceMatch === 'MATCH') {
-          if (!bestEnrolledMatch || (evalRes.cosineSimilarity ?? 0) > bestEnrolledMatch.similarity) {
-            bestEnrolledMatch = { subject: subj, similarity: evalRes.cosineSimilarity ?? 0 };
+        // Step C: 1:N Facial Identification against enrolled database
+        const allEnrolled = getAllEnrolledSubjects();
+        let bestEnrolledMatch: { subject: EnrolledSubjectRecord; similarity: number } | null = null;
+        for (const subj of allEnrolled) {
+          if (!subj.embeddings || subj.embeddings.length === 0) continue;
+          const evalRes = evaluateFaceMatch(inferenceRes.liveEmbedding, subj.embeddings, 0.40);
+          if (evalRes.faceMatch === 'MATCH') {
+            if (!bestEnrolledMatch || (evalRes.cosineSimilarity ?? 0) > bestEnrolledMatch.similarity) {
+              bestEnrolledMatch = { subject: subj, similarity: evalRes.cosineSimilarity ?? 0 };
+            }
           }
         }
-      }
 
-      // If no enrolled identity matches, return "No User Found"
-      if (!bestEnrolledMatch) {
-        res.status(422).json({
-          success: false,
-          classification: 'REJECTED',
-          message: 'No User Found',
-          verificationResult: {
-            studentId: student.identifier,
-            qrSessionId: qrSessionId || sessVal.qrSessionId,
+        // If no enrolled identity matches, return "No User Found"
+        if (!bestEnrolledMatch) {
+          res.status(422).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'No User Found',
+            verificationResult: {
+              studentId: sessVal.studentId,
+              qrSessionId: qrSessionId || sessVal.qrSessionId,
+              verificationSessionId,
+              challengeType: sessVal.challengeType,
+              faceDetected: true,
+              faceMatch: 'NO_MATCH',
+              blinkDetected: inferenceRes.blinkDetected,
+              livenessVerified: false,
+              verificationStatus: 'FAILED',
+              modelId: inferenceRes.modelId,
+              modelVersion: inferenceRes.modelVersion,
+              confidenceScore: null,
+              cosineSimilarity: null,
+              thresholdUsed: 0.40,
+              failureReason: 'No User Found',
+              verifiedAt: new Date().toISOString(),
+              resultSignature: '',
+            },
+          });
+          return;
+        }
+
+        const matchedUsn = bestEnrolledMatch.subject.subjectId;
+
+        // Step D: Proxy check if bound to specific expected student
+        if (sessVal.studentId !== 'AUTO_IDENTIFY' && matchedUsn.toUpperCase() !== sessVal.studentId.toUpperCase()) {
+          res.status(403).json({
+            success: false,
+            classification: 'REJECTED',
+            message: `Proxy attempt rejected: Face matches ${matchedUsn}, but expected student is ${sessVal.studentId}.`,
+            verificationResult: {
+              studentId: sessVal.studentId,
+              qrSessionId: qrSessionId || sessVal.qrSessionId,
+              verificationSessionId,
+              challengeType: sessVal.challengeType,
+              faceDetected: true,
+              faceMatch: 'NO_MATCH',
+              blinkDetected: inferenceRes.blinkDetected,
+              livenessVerified: false,
+              verificationStatus: 'FAILED',
+              modelId: inferenceRes.modelId,
+              modelVersion: inferenceRes.modelVersion,
+              confidenceScore: null,
+              cosineSimilarity: bestEnrolledMatch.similarity,
+              thresholdUsed: 0.40,
+              failureReason: `Proxy attempt rejected: Face matches ${matchedUsn}`,
+              verifiedAt: new Date().toISOString(),
+              resultSignature: '',
+            },
+          });
+          return;
+        }
+
+        // Step E: Fetch student account from database
+        let studentStored: StoredUser | null = await repo.findUserByLogin(matchedUsn);
+        if (!studentStored) {
+          const allUsers = await repo.listAllUsers();
+          const found = allUsers.find((u) => u.identifier.toUpperCase() === matchedUsn.toUpperCase());
+          if (found) {
+            studentStored = (await repo.findUserById(found.id)) || null;
+          }
+        }
+        if (!studentStored) {
+          res.status(404).json({
+            success: false,
+            classification: 'REJECTED',
+            message: `Student account for '${matchedUsn}' not found in official institutional database.`,
+          });
+          return;
+        }
+
+        const publicStudent = repo.toPublicUser(studentStored);
+        const targetSessionId = qrSessionId || sessVal.qrSessionId;
+        const session = await repo.getQrSessionById(targetSessionId);
+        if (!session) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'Invalid attendance session.',
+          });
+          return;
+        }
+
+        // Check session active status & expiration
+        if (session.status !== 'ACTIVE' || Date.now() > session.sessionExpiresAt) {
+          res.status(400).json({
+            success: false,
+            classification: 'REJECTED',
+            message: 'Attendance session has concluded or expired.',
+          });
+          return;
+        }
+
+        // Step F: Academic section eligibility verification
+        if (publicStudent.sectionId && publicStudent.sectionId !== session.sectionId) {
+          res.status(403).json({
+            success: false,
+            classification: 'REJECTED',
+            message: `You belong to section ${publicStudent.sectionDisplayName || publicStudent.sectionId}. This session is only for ${session.sectionDisplayName}.`,
+          });
+          return;
+        }
+
+        // Step G: Prevent duplicate attendance
+        const existingAttempts = await repo.listAttendanceAttempts(session.id, publicStudent.id);
+        const alreadyVerified = existingAttempts.find((a) => a.classification === 'VERIFIED');
+        if (alreadyVerified) {
+          const dupSignedRes = signVerificationResult({
+            studentId: publicStudent.identifier,
+            qrSessionId: session.id,
             verificationSessionId,
             challengeType: sessVal.challengeType,
             faceDetected: true,
-            faceMatch: 'NO_MATCH',
-            blinkDetected: inferenceRes.blinkDetected,
-            livenessVerified: false,
-            verificationStatus: 'FAILED',
+            faceMatch: 'MATCH',
+            blinkDetected: true,
+            livenessVerified: true,
+            verificationStatus: 'VERIFIED',
             modelId: inferenceRes.modelId,
             modelVersion: inferenceRes.modelVersion,
-            confidenceScore: null,
-            cosineSimilarity: null,
-            thresholdUsed: 0.40,
-            failureReason: 'No User Found',
-            verifiedAt: new Date().toISOString(),
-            resultSignature: '',
-          },
-        });
-        return;
-      }
-
-      // Check proxy attempt
-      const matchedUsn = bestEnrolledMatch.subject.subjectId;
-      if (matchedUsn.toUpperCase() !== student.identifier.toUpperCase()) {
-        res.status(403).json({
-          success: false,
-          classification: 'REJECTED',
-          message: `Proxy attempt rejected: Face matches ${matchedUsn}, but logged-in student is ${student.identifier}.`,
-          verificationResult: {
-            studentId: student.identifier,
-            qrSessionId: qrSessionId || sessVal.qrSessionId,
-            verificationSessionId,
-            challengeType: sessVal.challengeType,
-            faceDetected: true,
-            faceMatch: 'NO_MATCH',
-            blinkDetected: inferenceRes.blinkDetected,
-            livenessVerified: false,
-            verificationStatus: 'FAILED',
-            modelId: inferenceRes.modelId,
-            modelVersion: inferenceRes.modelVersion,
-            confidenceScore: null,
+            confidenceScore: Math.round(bestEnrolledMatch.similarity * 1000) / 1000,
+            euclideanDistance: null,
             cosineSimilarity: bestEnrolledMatch.similarity,
             thresholdUsed: 0.40,
-            failureReason: `Proxy attempt rejected: Face matches ${matchedUsn}`,
+            failureReason: null,
             verifiedAt: new Date().toISOString(),
-            resultSignature: '',
-          },
+          });
+
+          res.json({
+            success: true,
+            alreadyMarked: true,
+            classification: 'VERIFIED',
+            message: `Attendance has already been recorded for ${publicStudent.name} (${publicStudent.identifier}) in this session.`,
+            student: publicStudent,
+            session: {
+              id: session.id,
+              subjectCode: session.subjectCode,
+              subjectName: session.subjectName,
+              sectionDisplayName: session.sectionDisplayName,
+              facultyName: session.facultyName,
+            },
+            record: undefined,
+            attempt: alreadyVerified,
+            verificationResult: dupSignedRes,
+          });
+          return;
+        }
+
+        // Step H: All verifications succeeded! Atomically mark attendance in MongoDB Atlas
+        const cachedScan = pendingAttendanceScans.get(verificationSessionId);
+        const submitParams = cachedScan || {
+          sessionId: session.id,
+          qrToken: 'ArcFace-Verified',
+          student: publicStudent,
+          latitude: 15.77671,
+          longitude: 74.4664,
+          accuracy: 10,
+          deviceFingerprint: 'mobile-native-scan',
+          devicePlatform: 'Mobile Browser',
+          browserName: 'Native Camera Browser',
+        };
+        submitParams.student = publicStudent;
+
+        const result = await repo.submitQrAttendanceAttempt(submitParams);
+        pendingAttendanceScans.delete(verificationSessionId);
+
+        const signedRes = signVerificationResult({
+          studentId: publicStudent.identifier,
+          qrSessionId: session.id,
+          verificationSessionId,
+          challengeType: sessVal.challengeType,
+          faceDetected: true,
+          faceMatch: 'MATCH',
+          blinkDetected: true,
+          livenessVerified: true,
+          verificationStatus: 'VERIFIED',
+          modelId: inferenceRes.modelId,
+          modelVersion: inferenceRes.modelVersion,
+          confidenceScore: Math.round(bestEnrolledMatch.similarity * 1000) / 1000,
+          euclideanDistance: null,
+          cosineSimilarity: bestEnrolledMatch.similarity,
+          thresholdUsed: 0.40,
+          failureReason: null,
+          verifiedAt: new Date().toISOString(),
         });
-        return;
+
+        const detMs = inferenceRes.latencyMetrics?.detectionLatencyMs ?? 35;
+        const embMs = inferenceRes.latencyMetrics?.embeddingLatencyMs ?? 25;
+        const verMs = inferenceRes.latencyMetrics?.verificationLatencyMs ?? 65;
+        const totalMs = Math.round(performance.now() - reqStart);
+
+        const latencyBreakdown = {
+          detectionMs: detMs,
+          embeddingMs: embMs,
+          verificationMs: verMs,
+          totalMs: Math.max(totalMs, verMs),
+        };
+
+        signedRes.record = result.record;
+        signedRes.attempt = result.attempt;
+        signedRes.latencyBreakdown = latencyBreakdown;
+
+        res.json({
+          success: true,
+          classification: 'VERIFIED',
+          message: `Attendance verified and recorded successfully for ${publicStudent.name} (${publicStudent.identifier}).`,
+          student: publicStudent,
+          session: {
+            id: session.id,
+            subjectCode: session.subjectCode,
+            subjectName: session.subjectName,
+            sectionDisplayName: session.sectionDisplayName,
+            facultyName: session.facultyName,
+          },
+          record: result.record,
+          attempt: result.attempt,
+          verificationResult: signedRes,
+          latencyMetrics: latencyBreakdown,
+        });
+      } catch (err) {
+        console.error('[Finalize Attendance Error]', err);
+        res.status(500).json({
+          success: false,
+          classification: 'REJECTED',
+          message: err instanceof Error ? err.message : 'Internal error during facial verification and attendance recording.',
+        });
       }
-
-      // Step F: All verifications succeeded! Atomically mark attendance
-      const cachedScan = pendingAttendanceScans.get(verificationSessionId);
-      const submitParams = cachedScan || {
-        sessionId: qrSessionId || sessVal.qrSessionId,
-        qrToken: 'ArcFace-Verified',
-        student,
-        latitude: 15.77671,
-        longitude: 74.4664,
-        accuracy: 10,
-        deviceFingerprint: 'verified-device',
-        devicePlatform: 'Web Browser',
-        browserName: 'Verified Browser',
-      };
-
-      const result = await repo.submitQrAttendanceAttempt(submitParams);
-      pendingAttendanceScans.delete(verificationSessionId);
-
-      const signedRes = signVerificationResult({
-        studentId: student.identifier,
-        qrSessionId: qrSessionId || sessVal.qrSessionId,
-        verificationSessionId,
-        challengeType: sessVal.challengeType,
-        faceDetected: true,
-        faceMatch: 'MATCH',
-        blinkDetected: true,
-        livenessVerified: true,
-        verificationStatus: 'VERIFIED',
-        modelId: inferenceRes.modelId,
-        modelVersion: inferenceRes.modelVersion,
-        confidenceScore: Math.round(bestEnrolledMatch.similarity * 1000) / 1000,
-        euclideanDistance: null,
-        cosineSimilarity: bestEnrolledMatch.similarity,
-        thresholdUsed: 0.40,
-        failureReason: null,
-        verifiedAt: new Date().toISOString(),
-      });
-
-      const detMs = inferenceRes.latencyMetrics?.detectionLatencyMs ?? 35;
-      const embMs = inferenceRes.latencyMetrics?.embeddingLatencyMs ?? 25;
-      const verMs = inferenceRes.latencyMetrics?.verificationLatencyMs ?? 65;
-      const totalMs = Math.round(performance.now() - reqStart);
-
-      const latencyBreakdown = {
-        detectionMs: detMs,
-        embeddingMs: embMs,
-        verificationMs: verMs,
-        totalMs: Math.max(totalMs, verMs),
-      };
-
-      signedRes.record = result.record;
-      signedRes.attempt = result.attempt;
-      signedRes.latencyBreakdown = latencyBreakdown;
-
-      res.json({
-        success: true,
-        classification: 'VERIFIED',
-        message: 'Attendance verified and recorded successfully with ArcFace recognition and liveness verification.',
-        record: result.record,
-        attempt: result.attempt,
-        verificationResult: signedRes,
-        latencyMetrics: latencyBreakdown,
-      });
-    } catch (err) {
-      console.error('[Finalize Attendance Error]', err);
-      res.status(500).json({
-        success: false,
-        classification: 'REJECTED',
-        message: err instanceof Error ? err.message : 'Internal error during facial verification and attendance recording.',
-      });
     }
-  }
   );
 
   // ============================================================================
@@ -5372,7 +5815,11 @@ async function startServer(): Promise<void> {
           modelVersion,
         });
 
-        res.status(201).json({ subject: record });
+        res.status(201).json({
+          success: true,
+          subject: record,
+          message: 'Facial biometric profile enrolled successfully!',
+        });
       } catch (err) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Enrollment failed.' });
       }

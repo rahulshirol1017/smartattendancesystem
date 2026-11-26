@@ -26,6 +26,7 @@ import { QRScannerModal } from './components/QRScannerModal.tsx';
 import { FacultyQRAttendanceView } from './views/FacultyQRAttendanceView.tsx';
 import { AdminAttendanceMonitoringView } from './views/AdminAttendanceMonitoringView.tsx';
 import { AdminFacialModelView } from './views/AdminFacialModelView.tsx';
+import { MobileAttendanceView } from './views/MobileAttendanceView.tsx';
 import { loadPretrainedFaceModels } from './facial-verification/modelLoader.ts';
 
 function getDomainRoutePath(role: UserRole, section: NavigationSection): string {
@@ -39,8 +40,9 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [publicRoute, setPublicRoute] = useState<'hero' | 'auth'>(() => {
+  const [publicRoute, setPublicRoute] = useState<'hero' | 'auth' | 'attend'>(() => {
     const path = window.location.pathname.toLowerCase();
+    if (path.startsWith('/attend')) return 'attend';
     return path === '/auth' || path === '/login' ? 'auth' : 'hero';
   });
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'register'>('login');
@@ -60,7 +62,9 @@ export default function App() {
   useEffect(() => {
     const onPopState = () => {
       const path = window.location.pathname.toLowerCase();
-      if (path === '/auth' || path === '/login') {
+      if (path.startsWith('/attend')) {
+        setPublicRoute('attend');
+      } else if (path === '/auth' || path === '/login') {
         setPublicRoute('auth');
       } else if (path === '/' || path === '') {
         setPublicRoute('hero');
@@ -71,11 +75,11 @@ export default function App() {
   }, []);
 
   const navigatePublicRoute = useCallback(
-    (target: 'hero' | 'auth', mode: 'login' | 'register' = 'login') => {
+    (target: 'hero' | 'auth' | 'attend', mode: 'login' | 'register' = 'login') => {
       setAuthInitialMode(mode);
       setPublicRoute(target);
       try {
-        const nextUrl = target === 'auth' ? '/auth' : '/';
+        const nextUrl = target === 'attend' ? '/attend' : target === 'auth' ? '/auth' : '/';
         if (window.location.pathname !== nextUrl) {
           window.history.pushState(null, '', nextUrl);
         }
@@ -281,6 +285,21 @@ export default function App() {
           </button>
         </div>
       </div>
+    );
+  }
+
+  if (publicRoute === 'attend') {
+    return (
+      <MobileAttendanceView
+        onGoToPortal={() => {
+          if (workspace) {
+            setPublicRoute('hero');
+            window.history.pushState(null, '', `/${workspace.user.role}/dashboard`);
+          } else {
+            navigatePublicRoute('auth', 'login');
+          }
+        }}
+      />
     );
   }
 

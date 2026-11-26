@@ -4,7 +4,7 @@ import crypto from 'crypto';
 
 export interface EmailDeliveryResult {
   sent: boolean;
-  mode: 'smtp' | 'console_dev';
+  mode: 'smtp';
   messageId?: string;
   error?: string;
 }
@@ -21,28 +21,21 @@ function extractCleanEmail(rawFrom: string, fallbackUser?: string): string {
 }
 
 /**
- * Enterprise Email Delivery Service
- *
- * Configured via environment variables:
- * - SMTP_HOST: Hostname of the mail server (e.g. smtp.gmail.com, mail.vtu.ac.in)
- * - SMTP_PORT: Port (e.g. 587 for STARTTLS or 465 for SSL/TLS)
- * - SMTP_USER: Username / Email (e.g. your-email@gmail.com)
- * - SMTP_PASS: Password / App Password
- * - SMTP_FROM: Sender email (defaults to VTU Smart Attendance <no-reply@vtu.ac.in>)
- * - SMTP_SECURE: "true" for implicit TLS (port 465)
- *
+ * Low-level RFC 5321 / 5322 SMTP Mail Delivery Client
  * Supports:
- * - RFC 5321 pure envelope return paths (MAIL FROM)
- * - RFC 5322 formatted display headers (From: "VTU Smart Attendance" <email>)
- * - RFC 3207 STARTTLS socket upgrade on Port 587
- * - SMTPS direct TLS handshake on Port 465
- * - Console development fallback with OTP visible when SMTP is unconfigured
+ * - Direct SMTPS TLS handshake (Port 465)
+ * - RFC 3207 STARTTLS upgrade (Port 587)
+ * - Plain / AUTH LOGIN authentication
+ * - Strict error propagation (no silent dev fallbacks)
+ * - Zero raw OTP logging
  */
-export async function sendPasswordResetEmail(
-  toEmail: string,
-  otpCode: string,
-  userName?: string
-): Promise<EmailDeliveryResult> {
+async function deliverSmtpEmail(params: {
+  toEmail: string;
+  subject: string;
+  textBody: string;
+}): Promise<EmailDeliveryResult> {
+  const { toEmail, subject, textBody } = params;
+
   const host = process.env.SMTP_HOST?.trim();
   const port = Number(process.env.SMTP_PORT) || 587;
   const user = process.env.SMTP_USER?.trim();
@@ -52,41 +45,17 @@ export async function sendPasswordResetEmail(
   const fromHeader = rawFrom.includes('<') ? rawFrom : `"VTU Smart Attendance" <${cleanFromEmail}>`;
   const secure = process.env.SMTP_SECURE === 'true' || port === 465;
 
-  const subject = 'VTU Smart Attendance — Password Reset Verification Code';
-  const textBody = `Dear ${userName || 'Student/Faculty'},
-
-You have requested to reset your password for the VTU Smart Attendance System.
-
-Your 6-digit verification code is:
-
-    ${otpCode}
-
-This code will expire in 15 minutes. It can only be used once.
-If you did not request a password reset, please ignore this email or contact your departmental administrator immediately.
-
-Visvesvaraya Technological University, Jnana Sangama, Belagavi - 590018
-Department of Computer Science & Business Systems
-`;
-
-  // Always log the OTP to server console so administrators/developers can verify immediately
-  console.log(
-    '\n' +
-      '='.repeat(78) +
-      '\n' +
-      `[VTU EMAIL DISPATCH] To: ${toEmail}\n` +
-      `Subject: ${subject}\n` +
-      `Verification Code: [ ${otpCode} ] (Valid for 15 minutes)\n` +
-      (host ? `Delivery Provider: Live SMTP (${host}:${port})\n` : `Delivery Provider: Console Dev (Configure SMTP_HOST in Render)\n`) +
-      '='.repeat(78) +
-      '\n'
-  );
-
-  // If no SMTP server configured, return console_dev mode success
   if (!host) {
-    return { sent: true, mode: 'console_dev' };
+    console.warn(`[VTU EMAIL DISPATCH] Email to ${toEmail} blocked: SMTP_HOST is not configured.`);
+    return {
+      sent: false,
+      mode: 'smtp',
+      error: 'SMTP mail service is unconfigured on the server. Please configure SMTP credentials to dispatch emails.',
+    };
   }
 
-  // Live SMTP delivery over TLS (Port 465) or STARTTLS (Port 587)
+  console.log(`[VTU EMAIL DISPATCH] Disagreeing with placeholder delivery: Dispatching to ${toEmail} via SMTP ${host}:${port}...`);
+
   return new Promise<EmailDeliveryResult>((resolve) => {
     let resolved = false;
     const safeResolve = (res: EmailDeliveryResult) => {
@@ -115,7 +84,7 @@ Department of Computer Science & Business Systems
         safeResolve({
           sent: false,
           mode: 'smtp',
-          error: `SMTP Timeout after ${timeoutMs / 1000}s connecting to ${host}:${port}`,
+          error: `SMTP Timeout after ${timeoutMs / 1000}s connecting to mail server ${host}:${port}`,
         });
       }, timeoutMs);
 
@@ -207,19 +176,20 @@ Department of Computer Science & Business Systems
               clearTimeout(timeout);
               send(sock, 'QUIT');
               sock.end();
+              console.log(`[VTU EMAIL DISPATCH] Email successfully accepted by ${host} for ${toEmail}.`);
               safeResolve({ sent: true, mode: 'smtp' });
             } else if (code >= 400) {
               clearTimeout(timeout);
               sock.destroy();
-              console.warn(`[VTU EMAIL ERROR] SMTP error at step ${step}: ${line}`);
-              safeResolve({ sent: false, mode: 'smtp', error: line });
+              console.warn(`[VTU EMAIL ERROR] SMTP server rejected with: ${line}`);
+              safeResolve({ sent: false, mode: 'smtp', error: `SMTP server returned ${line}` });
             }
           }
         });
 
         sock.on('error', (err) => {
           clearTimeout(timeout);
-          console.warn(`[VTU EMAIL ERROR] Socket error: ${err.message}`);
+          console.warn(`[VTU EMAIL ERROR] SMTP connection error: ${err.message}`);
           safeResolve({ sent: false, mode: 'smtp', error: err.message });
         });
       };
@@ -233,4 +203,60 @@ Department of Computer Science & Business Systems
       });
     }
   });
+}
+
+/**
+ * Dispatches a password reset OTP verification code exclusively via SMTP.
+ * Never logs or reveals the raw OTP value in production logs.
+ */
+export async function sendPasswordResetEmail(
+  toEmail: string,
+  otpCode: string,
+  userName?: string
+): Promise<EmailDeliveryResult> {
+  const subject = 'VTU Smart Attendance — Password Reset Verification Code';
+  const textBody = `Dear ${userName || 'Student/Faculty'},
+
+You have requested to reset your password for the VTU Smart Attendance System.
+
+Your 6-digit verification code is:
+
+    ${otpCode}
+
+This code will expire in 15 minutes. It can only be used once.
+If you did not request a password reset, please ignore this email or contact your departmental administrator immediately.
+
+Visvesvaraya Technological University, Jnana Sangama, Belagavi - 590018
+Department of Computer Science & Business Systems
+`;
+
+  return deliverSmtpEmail({ toEmail, subject, textBody });
+}
+
+/**
+ * Dispatches a student account registration verification OTP exclusively via SMTP.
+ * Never logs or reveals the raw OTP value in production logs.
+ */
+export async function sendRegistrationOtpEmail(
+  toEmail: string,
+  otpCode: string,
+  userName?: string
+): Promise<EmailDeliveryResult> {
+  const subject = 'VTU Smart Attendance — Student Account Email Verification Code';
+  const textBody = `Dear ${userName || 'Student'},
+
+Thank you for registering your student account on the VTU Smart Attendance System.
+
+Your 6-digit email verification code is:
+
+    ${otpCode}
+
+This code will expire in 15 minutes. It can only be used once.
+Please enter this code on the registration page to verify your email address and activate your account.
+
+Visvesvaraya Technological University, Jnana Sangama, Belagavi - 590018
+Department of Computer Science & Business Systems
+`;
+
+  return deliverSmtpEmail({ toEmail, subject, textBody });
 }

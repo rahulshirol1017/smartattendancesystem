@@ -262,33 +262,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
 
-        {/* Prominent Scan Attendance Banner */}
-        <div className="rounded-md border-2 border-[#165B33] bg-[#FAF3E3] p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-[#165B33] flex items-center justify-center shrink-0">
-              <Camera className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <div className="text-sm font-semibold text-[#165B33]">
-                {activeClassSession
-                  ? `Active Class Session: ${activeClassSession.subjectName}`
-                  : 'Time & Location Verified Attendance'}
-              </div>
-              <div className="text-xs text-[#241710]/80">
-                {activeClassSession
-                  ? `Dynamic QR code is live for ${activeClassSession.sectionDisplayName} (${activeClassSession.classroom}). Tap to scan!`
-                  : 'Scan the dynamic classroom QR code using your device within the campus perimeter.'}
-              </div>
-            </div>
+        {/* Daily Attendance Native Camera Notice */}
+        <div className="rounded-md border border-[#E3D2B4] bg-[#FAF3E3] p-3 text-xs text-[#6B5A4C] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shadow-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-base">📷</span>
+            <span>
+              <strong>Daily Attendance:</strong> Scan the teacher's classroom QR code directly using your phone's built-in camera app.
+            </span>
           </div>
-          <button
-            type="button"
-            onClick={onOpenScanModal}
-            className="w-full sm:w-auto shrink-0 bg-[#DF6A24] hover:bg-[#c95b1b] text-white px-5 py-2.5 rounded-md text-xs font-semibold shadow-sm transition-colors flex items-center justify-center gap-2"
-          >
-            <Camera className="w-4 h-4" />
-            <span>Scan Attendance</span>
-          </button>
+          <span className="font-mono text-[11px] bg-[#165B33] text-white px-2 py-0.5 rounded font-semibold shrink-0">
+            Native Camera Powered
+          </span>
         </div>
 
         <section

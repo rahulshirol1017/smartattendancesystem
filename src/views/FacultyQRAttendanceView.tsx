@@ -154,13 +154,15 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
     requestHostLocation();
   }, [requestHostLocation]);
 
-  // Generate QR Canvas Image whenever token changes
+  // Generate QR Canvas Image whenever token changes (encodes direct HTTPS attendance link)
   useEffect(() => {
-    if (!activeSession?.currentQrToken) {
+    if (!activeSession?.currentQrToken || !activeSession?.id) {
       setQrDataUrl('');
       return;
     }
-    QRCode.toDataURL(activeSession.currentQrToken, {
+    const origin = window.location.origin;
+    const attendanceUrl = `${origin}/attend?sessionId=${encodeURIComponent(activeSession.id)}&token=${encodeURIComponent(activeSession.currentQrToken)}`;
+    QRCode.toDataURL(attendanceUrl, {
       width: 320,
       margin: 2,
       color: {
@@ -171,7 +173,7 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
     })
       .then((url) => setQrDataUrl(url))
       .catch((err) => console.error('Failed to generate QR Data URL:', err));
-  }, [activeSession?.currentQrToken]);
+  }, [activeSession?.currentQrToken, activeSession?.id]);
 
   // Android FLAG_SECURE and Screen / Camera Capture Protection
   useEffect(() => {
@@ -684,7 +686,7 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
             </div>
 
             {/* Android FLAG_SECURE & Anti-Screenshot Status */}
-            <div className="w-full max-w-[280px] mb-3 py-1 px-2.5 bg-emerald-50 border border-emerald-300 rounded flex items-center justify-between text-[11px] text-emerald-800">
+            <div className="w-full max-w-[280px] mb-2 py-1 px-2.5 bg-emerald-50 border border-emerald-300 rounded flex items-center justify-between text-[11px] text-emerald-800">
               <span className="flex items-center gap-1.5 font-semibold">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
                 Android FLAG_SECURE
@@ -692,6 +694,10 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
               <span className="font-mono text-[10px] bg-emerald-200/60 text-emerald-900 px-1.5 py-0.5 rounded font-bold">
                 {flagSecureEnabled ? 'Active (Screenshots Blocked)' : 'Enforced on Android'}
               </span>
+            </div>
+
+            <div className="w-full max-w-[280px] mb-3 text-center text-[11px] text-[#6B5A4C] bg-[#FAF3E3] border border-[#E3D2B4] rounded py-1 px-2">
+              📱 Point standard phone camera at QR to open mobile attendance
             </div>
 
             {/* Refresh Countdown & Progress Bar */}

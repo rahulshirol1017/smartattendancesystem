@@ -24,7 +24,6 @@ interface AppLayoutProps {
 
 const STUDENT_NAV_ORDER: NavigationSection[] = [
   'dashboard',
-  'qr-attendance',
   'my-attendance',
   'subject-reports',
   'timetable',

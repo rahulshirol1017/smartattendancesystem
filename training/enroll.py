@@ -352,43 +352,70 @@ def main():
     parser = argparse.ArgumentParser(
         description="VTU Private Facial Biometric Enrollment via Terminal"
     )
-    parser.add_argument("--usn", required=True, help="Student USN (e.g. 60 or 2VX24CB060)")
+    parser.add_argument("--usn", required=True, help="Student USN (e.g. 100 or 2VX24CB100)")
+    parser.add_argument("--name", help="Student Full Name (optional, defaults to roster name or USN)")
+    parser.add_argument("--dept", default="CSBS", help="Department (default: CSBS)")
+    parser.add_argument("--section", choices=["A", "B"], default="B", help="Section (default: B)")
     parser.add_argument("--samples", type=int, default=5, help="Number of facial angle samples to capture (default: 5)")
     parser.add_argument("--auto", action="store_true", help="Auto-capture when face pose is held stable")
     parser.add_argument("--headless", action="store_true", help="Non-interactive mode (for CI/automated testing)")
     parser.add_argument("--input-images", help="Optional path to directory of existing images to enroll")
     args = parser.parse_args()
 
-    # Step 1: Verify USN against official institutional roster BEFORE touching camera
+    # Step 1: Resolve student identity from roster or dynamically register new identity
     roster = load_student_roster()
     student = find_student(roster, args.usn)
 
-    if not student:
-        print("\n" + "=" * 64)
-        print("[ACCESS DENIED] UNAUTHORIZED / NON-EXISTENT USN")
-        print("=" * 64)
-        print(f"Error: USN '{args.usn}' not found in the official institutional student roster.")
-        print("\nAvailable authorized student identities:")
-        for s in roster:
-            print(f"  - {s['usn']} (USN {s.get('shortUsn', s.get('rollNumber', ''))}): {s['name']} [{s.get('department', 'CSBS')} Section {s.get('section', 'A')}]")
-        print("=" * 64)
-        print("Camera access ABORTED. Facial enrollment is restricted to verified student identities.")
-        sys.exit(1)
+    clean_usn = args.usn.strip().upper()
+    if student:
+        student_usn = student["usn"]
+        student_name = args.name.strip() if args.name else student.get("name", f"Student {student_usn}")
+        dept = student.get("department", "CSBS")
+        sec = student.get("section", "B")
+        sem = student.get("semester", 5)
+    else:
+        # Allow any USN without restriction
+        if clean_usn.isdigit() and len(clean_usn) <= 3:
+            student_usn = f"2VX24CB{clean_usn.zfill(3)}"
+        else:
+            student_usn = clean_usn
 
-    student_usn = student["usn"]
-    student_name = student["name"]
+        student_name = args.name.strip() if args.name else f"Student {student_usn}"
+        dept = args.dept or "CSBS"
+        sec = args.section or "B"
+        sem = 5
+
+        # Automatically register student in local roster so future lookups succeed
+        new_entry = {
+            "usn": student_usn,
+            "shortUsn": student_usn[-3:] if student_usn[-3:].isdigit() else clean_usn,
+            "name": student_name,
+            "department": dept,
+            "section": sec,
+            "sectionId": f"sec-{dept.lower()}-{sec.lower()}",
+            "semester": sem,
+            "academicYear": "2026",
+            "rollNumber": student_usn[-3:] if student_usn[-3:].isdigit() else clean_usn,
+        }
+        roster.append(new_entry)
+        try:
+            with open(ROSTER_PATH, "w", encoding="utf-8") as f:
+                json.dump(roster, f, indent=2)
+            print(f"[INFO] Registered new student identity '{student_usn}' ({student_name}) in student roster.")
+        except Exception as e:
+            print(f"[WARN] Failed to write new student to roster: {e}")
 
     print("\n" + "=" * 64)
     print("VTU SMART ATTENDANCE - TERMINAL FACIAL ENROLLMENT")
     print("=" * 64)
     print(f"Student USN     : {student_usn}")
     print(f"Full Name       : {student_name}")
-    print(f"Department      : {student.get('department', 'CSBS')} (Section {student.get('section', 'A')})")
-    print(f"Semester        : {student.get('semester', 5)}")
+    print(f"Department      : {dept} (Section {sec})")
+    print(f"Semester        : {sem}")
     print(f"Pretrained Model: InsightFace MobileFaceNet (ArcFace w600k 512-D)")
     print(f"Storage Security: AES-256-GCM Encrypted Biometric Store (.secure_store)")
     print("=" * 64)
-    print("Status: USN verified in institutional database. Opening camera...")
+    print("Status: Student identity confirmed. Opening camera...")
 
     # Load ML models
     detector = FastFaceDetector(SCRFD_MODEL_PATH)

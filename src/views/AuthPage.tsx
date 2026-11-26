@@ -96,7 +96,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!regName.trim() || !regUsn.trim() || !regEmail.trim()) {
-      setError('Full name, USN, and university email address are required.');
+      setError('Full name, USN, and email address are required.');
+      return;
+    }
+    const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+    if (!emailRegex.test(regEmail.trim())) {
+      setError('Please provide a valid personal or university email address.');
       return;
     }
     if (regPassword.length < 8) {
@@ -108,6 +113,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       return;
     }
     setError(null);
+    setSuccessMsg(null);
     setBusy(true);
     try {
       await onRegister({
@@ -121,7 +127,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
         sectionId: regSectionId || undefined,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to create account.');
+      setError(err instanceof Error ? err.message : 'Unable to create student account.');
     } finally {
       setBusy(false);
     }
@@ -139,9 +145,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     try {
       const res = await api.forgotPassword(forgotEmail.trim());
       setSuccessMsg(res.message);
-      if ((res as any).devOtp) {
-        setForgotOtp((res as any).devOtp);
-      }
+      setForgotOtp('');
       setForgotStep('verify_code');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to request verification code.');
@@ -636,7 +640,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       required
                       value={regName}
                       onChange={(e) => setRegName(e.target.value)}
-                      placeholder="Full name"
+                      placeholder="Student full name"
                       className="w-full rounded border border-[#E3D2B4] bg-white px-3 py-2 text-sm focus:border-[#165B33] focus:outline-none"
                     />
                   </div>
@@ -645,7 +649,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       htmlFor="reg-usn"
                       className="block text-xs font-medium text-[#241710] mb-1"
                     >
-                      USN
+                      Actual USN
                     </label>
                     <input
                       id="reg-usn"
@@ -653,7 +657,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       required
                       value={regUsn}
                       onChange={(e) => setRegUsn(e.target.value)}
-                      placeholder="e.g., 2VX24CB010"
+                      placeholder="e.g. 2VX24CB069"
                       className="w-full rounded border border-[#E3D2B4] bg-white px-3 py-2 text-sm uppercase font-mono focus:border-[#165B33] focus:outline-none"
                     />
                   </div>
@@ -665,7 +669,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       htmlFor="reg-email"
                       className="block text-xs font-medium text-[#241710] mb-1"
                     >
-                      University Email
+                      Personal or Institutional Email
                     </label>
                     <input
                       id="reg-email"
@@ -673,7 +677,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       required
                       value={regEmail}
                       onChange={(e) => setRegEmail(e.target.value)}
-                      placeholder="usn@vtu.ac.in"
+                      placeholder="your.email@gmail.com"
                       className="w-full rounded border border-[#E3D2B4] bg-white px-3 py-2 text-sm focus:border-[#165B33] focus:outline-none"
                     />
                   </div>
@@ -682,7 +686,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       htmlFor="reg-section"
                       className="block text-xs font-medium text-[#241710] mb-1"
                     >
-                      Section
+                      Branch & Section
                     </label>
                     <select
                       id="reg-section"
@@ -769,9 +773,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <button
                     type="submit"
                     disabled={busy}
-                    className="w-full rounded bg-[#165B33] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#104526] disabled:opacity-50 transition-colors"
+                    className="w-full rounded bg-[#165B33] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#104526] disabled:opacity-50 transition-colors cursor-pointer"
                   >
-                    {busy ? 'Creating account…' : 'Create Account'}
+                    {busy ? 'Creating Account…' : 'Create Student Account'}
                   </button>
                 </div>
               </form>

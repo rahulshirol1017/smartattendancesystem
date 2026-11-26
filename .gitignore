@@ -20,3 +20,4 @@ __pycache__/
 *.pyc
 training/data/
 training/checkpoints/
+*.code-workspace

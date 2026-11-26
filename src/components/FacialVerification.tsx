@@ -532,16 +532,27 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
             attempt: fin.attempt,
             latencyBreakdown: fin.latencyMetrics,
           };
-        } catch {
-          result = await verificationApi.verifyFace(
-            {
-              verificationSessionId: sessId,
-              sessionToken: token,
-              qrSessionId: qrId || undefined,
-              evidenceFrames: frames as VerificationEvidenceFrames,
-            },
-            baseUrl
-          );
+        } catch (finErr: any) {
+          result = {
+            studentId: stuId,
+            qrSessionId: qrId,
+            verificationSessionId: sessId,
+            challengeType: chType,
+            faceDetected: true,
+            faceMatch: 'NO_MATCH',
+            blinkDetected: false,
+            livenessVerified: false,
+            verificationStatus: 'FAILED',
+            modelId: ACTIVE_MODEL_ID,
+            modelVersion: ACTIVE_MODEL_VERSION,
+            confidenceScore: null,
+            euclideanDistance: null,
+            cosineSimilarity: null,
+            thresholdUsed: DEFAULT_THRESHOLD,
+            failureReason: finErr instanceof Error ? finErr.message : String(finErr || 'Attendance verification failed.'),
+            verifiedAt: new Date().toISOString(),
+            resultSignature: '',
+          };
         }
       } else {
         result = await verificationApi.verifyFace(

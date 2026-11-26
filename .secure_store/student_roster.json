@@ -48,63 +48,14 @@
     "rollNumber": "72"
   },
   {
-    "usn": "2VX24CB047",
-    "shortUsn": "47",
-    "name": "Karthik Joshi",
-    "email": "2vx24cb047@vtu.ac.in",
-    "department": "CSBS",
-    "section": "A",
-    "sectionId": "sec-csbs-a",
-    "semester": 5,
-    "academicYear": "2026",
-    "rollNumber": "47"
-  },
-  {
-    "usn": "2VX24CB001",
-    "shortUsn": "01",
-    "name": "Rahul Kulkarni",
-    "email": "2vx24cb001@vtu.ac.in",
-    "department": "CSBS",
-    "section": "A",
-    "sectionId": "sec-csbs-a",
-    "semester": 5,
-    "academicYear": "2026",
-    "rollNumber": "01"
-  },
-  {
-    "usn": "2VX24CB002",
-    "shortUsn": "02",
-    "name": "Sneha Patil",
-    "email": "2vx24cb002@vtu.ac.in",
-    "department": "CSBS",
-    "section": "A",
-    "sectionId": "sec-csbs-a",
-    "semester": 5,
-    "academicYear": "2026",
-    "rollNumber": "02"
-  },
-  {
-    "usn": "2VX24CB068",
-    "shortUsn": "68",
-    "name": "Ananya Deshpande",
-    "email": "2vx24cb068@vtu.ac.in",
+    "usn": "2VX24CB100",
+    "shortUsn": "100",
+    "name": "Student 2VX24CB100",
     "department": "CSBS",
     "section": "B",
     "sectionId": "sec-csbs-b",
     "semester": 5,
     "academicYear": "2026",
-    "rollNumber": "68"
-  },
-  {
-    "usn": "2VX24CB116",
-    "shortUsn": "116",
-    "name": "Pooja Angadi",
-    "email": "2vx24cb116@vtu.ac.in",
-    "department": "CSBS",
-    "section": "B",
-    "sectionId": "sec-csbs-b",
-    "semester": 5,
-    "academicYear": "2026",
-    "rollNumber": "116"
+    "rollNumber": "100"
   }
 ]

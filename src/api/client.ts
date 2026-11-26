@@ -236,6 +236,45 @@ export const api = {
     return res.user;
   },
 
+  async sendRegistrationOtp(payload: {
+    name: string;
+    identifier: string;
+    email: string;
+    password: string;
+    confirmPassword?: string;
+    college?: string;
+    department?: string;
+    programme?: string;
+    semester?: number;
+    sectionId?: string;
+  }): Promise<{ success: boolean; message: string; email: string; identifier: string }> {
+    return requestJson<{ success: boolean; message: string; email: string; identifier: string }>(
+      '/api/auth/register-send-otp',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async verifyRegistrationOtp(payload: {
+    identifier: string;
+    email?: string;
+    code: string;
+  }): Promise<{ user: UserProfile; token: string; message: string; facialEnrolled: boolean }> {
+    const res = await requestJson<{
+      user: UserProfile;
+      token: string;
+      message: string;
+      facialEnrolled: boolean;
+    }>('/api/auth/register-verify-otp', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    setStoredToken(res.token);
+    return res;
+  },
+
   async register(payload: {
     name: string;
     identifier: string;
@@ -259,29 +298,53 @@ export const api = {
     setStoredToken(null);
   },
 
-  async forgotPassword(email: string): Promise<{ success: boolean; message: string }> {
-    return requestJson<{ success: boolean; message: string }>('/api/auth/forgot-password', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    });
+  async forgotPassword(
+    identifierOrEmail: string
+  ): Promise<{ success: boolean; message: string; email?: string; identifier?: string }> {
+    const isEmail = identifierOrEmail.includes('@');
+    const body = isEmail ? { email: identifierOrEmail.trim() } : { identifier: identifierOrEmail.trim() };
+    return requestJson<{ success: boolean; message: string; email?: string; identifier?: string }>(
+      '/api/auth/forgot-password',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    );
   },
 
-  async verifyResetCode(email: string, code: string): Promise<{ success: boolean; message: string }> {
+  async verifyResetCode(
+    identifierOrEmail: string,
+    code: string
+  ): Promise<{ success: boolean; message: string }> {
+    const isEmail = identifierOrEmail.includes('@');
+    const body = isEmail
+      ? { email: identifierOrEmail.trim(), code }
+      : { identifier: identifierOrEmail.trim(), code };
     return requestJson<{ success: boolean; message: string }>('/api/auth/verify-reset-code', {
       method: 'POST',
-      body: JSON.stringify({ email, code }),
+      body: JSON.stringify(body),
     });
   },
 
   async resetPassword(payload: {
-    email: string;
+    identifierOrEmail?: string;
+    email?: string;
+    identifier?: string;
     code: string;
     newPassword: string;
     confirmPassword: string;
   }): Promise<{ success: boolean; message: string }> {
+    const rawInput = payload.identifierOrEmail || payload.email || payload.identifier || '';
+    const isEmail = rawInput.includes('@');
+    const body = {
+      ...(isEmail ? { email: rawInput.trim() } : { identifier: rawInput.trim() }),
+      code: payload.code,
+      newPassword: payload.newPassword,
+      confirmPassword: payload.confirmPassword,
+    };
     return requestJson<{ success: boolean; message: string }>('/api/auth/reset-password', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
   },
 
@@ -845,6 +908,38 @@ export const api = {
   // --------------------------------------------------------------------------
   // QR + FACIAL RECOGNITION & ATTENDANCE
   // --------------------------------------------------------------------------
+
+  validatePublicQrScan(params: {
+    sessionId: string;
+    qrToken: string;
+    latitude?: number;
+    longitude?: number;
+    accuracy?: number;
+    deviceFingerprint?: string;
+    devicePlatform?: string;
+    browserName?: string;
+  }): Promise<{
+    success: boolean;
+    qrValidated: boolean;
+    verificationSessionId: string;
+    sessionToken: string;
+    challengeType: LivenessChallengeType;
+    challengeInstruction: string;
+    sessionInfo: {
+      id: string;
+      subjectCode: string;
+      subjectName: string;
+      sectionDisplayName: string;
+      facultyName: string;
+      classroom?: string;
+    };
+    message?: string;
+  }> {
+    return requestJson('/api/qr-attendance/validate-scan-public', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
 
   validateQrScanBeforeFace(params: {
     sessionId: string;

@@ -1180,7 +1180,7 @@ export class DataRepository {
     return `VTU_SEC_${sessionId}_${expiresAt}_${nonce}_${hmac}`;
   }
 
-  private verifySecureQrToken(token: string, sessionId: string): { valid: boolean; reason?: string } {
+  public verifySecureQrToken(token: string, sessionId: string): { valid: boolean; reason?: string } {
     if (!token || !token.startsWith('VTU_SEC_')) {
       return { valid: false, reason: 'Invalid QR token format.' };
     }
