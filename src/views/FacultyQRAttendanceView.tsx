@@ -685,21 +685,6 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
               )}
             </div>
 
-            {/* Android FLAG_SECURE & Anti-Screenshot Status */}
-            <div className="w-full max-w-[280px] mb-2 py-1 px-2.5 bg-emerald-50 border border-emerald-300 rounded flex items-center justify-between text-[11px] text-emerald-800">
-              <span className="flex items-center gap-1.5 font-semibold">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
-                Android FLAG_SECURE
-              </span>
-              <span className="font-mono text-[10px] bg-emerald-200/60 text-emerald-900 px-1.5 py-0.5 rounded font-bold">
-                {flagSecureEnabled ? 'Active (Screenshots Blocked)' : 'Enforced on Android'}
-              </span>
-            </div>
-
-            <div className="w-full max-w-[280px] mb-3 text-center text-[11px] text-[#6B5A4C] bg-[#FAF3E3] border border-[#E3D2B4] rounded py-1 px-2">
-              📱 Point standard phone camera at QR to open mobile attendance
-            </div>
-
             {/* Refresh Countdown & Progress Bar */}
             <div className="w-full max-w-[280px] mb-4">
               <div className="flex items-center justify-between text-xs mb-1">
