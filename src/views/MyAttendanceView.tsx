@@ -1,5 +1,18 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Search } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import {
+  Search,
+  QrCode,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  AlertTriangle,
+  UserCheck,
+  RefreshCw,
+  Sparkles,
+  ArrowRight,
+  ShieldAlert,
+  Check,
+} from 'lucide-react';
 import { api, ApiRequestError } from '../api/client.ts';
 import { RecordStatusIndicator, StandingIndicator } from '../components/StatusIndicator.tsx';
 import { validateSessionConflicts } from '../shared/conflictCheck.ts';
@@ -8,11 +21,16 @@ import {
   AttendanceAuditLog,
   AttendanceCorrectionRequest,
   AttendanceRecord,
+  CentralizedAttendanceRosterItem,
+  CentralizedAttendanceSummary,
   ClassSession,
   ClassSessionType,
   ConflictDetail,
   FacultyAssignment,
   InstitutionalPolicy,
+  NavigationSection,
+  QRAttendanceSession,
+  RecordSource,
   SubjectAttendanceComputed,
   SubjectItem,
   TimetableEntry,
@@ -37,6 +55,7 @@ interface MyAttendanceViewProps {
   onStartCorrectionForRecord: (recordId: string) => void;
   onOpenSubjectReport: (subjectId: string) => void;
   onRefreshWorkspace: () => Promise<void>;
+  onNavigate?: (section: NavigationSection) => void;
 }
 
 function formatShortDate(dateStr: string): string {
@@ -62,6 +81,7 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
   onStartCorrectionForRecord,
   onOpenSubjectReport,
   onRefreshWorkspace,
+  onNavigate,
 }) => {
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(
     () => subjectMetrics[0]?.subject.id || subjects[0]?.id || ''
@@ -136,6 +156,15 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
     null
   );
 
+  // Centralized Attendance Management state
+  const [centralizedRoster, setCentralizedRoster] = useState<CentralizedAttendanceRosterItem[]>([]);
+  const [centralizedSummary, setCentralizedSummary] = useState<CentralizedAttendanceSummary | null>(null);
+  const [activeQrSession, setActiveQrSession] = useState<QRAttendanceSession | null>(null);
+  const [updatingStudentId, setUpdatingStudentId] = useState<string | null>(null);
+  const [isFinalizing, setIsFinalizing] = useState<boolean>(false);
+  const [isLaunchingQr, setIsLaunchingQr] = useState<boolean>(false);
+  const [isPollingActive, setIsPollingActive] = useState<boolean>(true);
+
   useEffect(() => {
     if (focusedSessionId) {
       setFacultyTab('scheduled');
@@ -163,31 +192,106 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
       .sort((a, b) => a.identifier.localeCompare(b.identifier));
   }, [cohortUsers, currentSession]);
 
+  // Real-time Centralized Attendance Polling (3s interval)
+  const loadCentralizedData = useCallback(async (classId: string) => {
+    try {
+      const res = await api.getClassAttendance(classId);
+      setCentralizedRoster(res.roster);
+      setCentralizedSummary(res.summary);
+      setActiveQrSession(res.qrSession || null);
+    } catch {
+      // Quiet fallback if session not yet created
+    }
+  }, []);
+
+  useEffect(() => {
+    if (user.role === 'student' || !currentSession?.id) return;
+    loadCentralizedData(currentSession.id);
+
+    const interval = window.setInterval(() => {
+      loadCentralizedData(currentSession.id);
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [user.role, currentSession?.id, loadCentralizedData]);
+
+  // Sync draft roll from records/centralizedRoster
   useEffect(() => {
     if (!currentSession) return;
     setTopicDraft(currentSession.topic || '');
-    const existingForSession = new Map<string, AttendanceRecord>();
-    for (const r of records) {
-      if (r.classId === currentSession.id) {
-        existingForSession.set(r.studentId, r);
-      }
-    }
     const nextRoll: Record<string, 'Present' | 'Absent' | 'Excused'> = {};
-    for (const stu of sectionStudents) {
-      const rec = existingForSession.get(stu.id);
-      if (rec) {
-        nextRoll[stu.id] =
-          rec.status === 'Absent'
-            ? 'Absent'
-            : rec.status === 'Excused'
-            ? 'Excused'
-            : 'Present';
-      } else {
-        nextRoll[stu.id] = 'Present';
+    if (centralizedRoster.length > 0) {
+      for (const item of centralizedRoster) {
+        if (item.status !== 'Pending') {
+          nextRoll[item.studentId] = item.status;
+        } else {
+          nextRoll[item.studentId] = 'Present';
+        }
+      }
+    } else {
+      const existingForSession = new Map<string, AttendanceRecord>();
+      for (const r of records) {
+        if (r.classId === currentSession.id) {
+          existingForSession.set(r.studentId, r);
+        }
+      }
+      for (const stu of sectionStudents) {
+        const rec = existingForSession.get(stu.id);
+        if (rec) {
+          nextRoll[stu.id] =
+            rec.status === 'Absent'
+              ? 'Absent'
+              : rec.status === 'Excused'
+              ? 'Excused'
+              : 'Present';
+        } else {
+          nextRoll[stu.id] = 'Present';
+        }
       }
     }
     setRollDraft(nextRoll);
-  }, [currentSession, records, sectionStudents]);
+  }, [currentSession, records, sectionStudents, centralizedRoster]);
+
+  // Unified roster displayed to faculty
+  const displayRoster = useMemo(() => {
+    let list = centralizedRoster;
+    if (list.length === 0 && sectionStudents.length > 0) {
+      list = sectionStudents.map((stu) => {
+        const existing = records.find(
+          (r) => r.studentId === stu.id && r.classId === currentSession?.id
+        );
+        const status = existing
+          ? (existing.status as 'Present' | 'Absent' | 'Excused')
+          : 'Pending';
+        const recordSource = existing?.recordSource;
+        const verificationMethod: 'QR' | 'Manual' | 'None' =
+          recordSource === 'QR Geoverified'
+            ? 'QR'
+            : recordSource === 'Faculty Register'
+            ? 'Manual'
+            : 'None';
+        return {
+          studentId: stu.id,
+          studentName: stu.name,
+          studentIdentifier: stu.identifier,
+          sectionDisplayName: stu.sectionDisplayName || currentSession?.sectionDisplayName || '',
+          record: existing,
+          status,
+          recordSource,
+          timestamp: existing?.timestamp,
+          recordedByName: existing?.recordedByName,
+          verificationMethod,
+        } as CentralizedAttendanceRosterItem;
+      });
+    }
+
+    const q = studentSearch.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (s) =>
+        s.studentName.toLowerCase().includes(q) || s.studentIdentifier.toLowerCase().includes(q)
+    );
+  }, [centralizedRoster, sectionStudents, records, currentSession, studentSearch]);
 
   const visibleStudents = useMemo(() => {
     const q = studentSearch.trim().toLowerCase();
@@ -468,20 +572,174 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
   // ============================================================================
   // 2. FACULTY & ADMIN ATTENDANCE MARKING VIEW
   // ============================================================================
-  const handleMarkAllPresent = () => {
-    const updated: Record<string, 'Present' | 'Absent' | 'Excused'> = {};
-    for (const stu of sectionStudents) {
-      updated[stu.id] = 'Present';
+  const handleToggleSingleStatus = async (
+    studentId: string,
+    status: 'Present' | 'Absent' | 'Excused'
+  ) => {
+    if (!currentSession) return;
+    setUpdatingStudentId(studentId);
+    setFeedback(null);
+    try {
+      // Optimistic update
+      setCentralizedRoster((prev) =>
+        prev.map((item) =>
+          item.studentId === studentId
+            ? {
+                ...item,
+                status,
+                recordSource: 'Faculty Register' as RecordSource,
+                verificationMethod: 'Manual',
+                timestamp: new Date().toISOString(),
+                conflictAlert: undefined,
+              }
+            : item
+        )
+      );
+
+      const res = await api.updateSingleAttendance({
+        classId: currentSession.id,
+        studentId,
+        status,
+      });
+
+      setCentralizedRoster(res.roster);
+      setCentralizedSummary(res.summary);
+      if (res.conflictDetected) {
+        setFeedback({
+          type: 'error',
+          text: res.conflictReason || 'Conflict flagged for review.',
+        });
+      } else {
+        setFeedback({
+          type: 'success',
+          text: `Marked ${status.toUpperCase()} manually. Saved to official register.`,
+        });
+      }
+      await onRefreshWorkspace();
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to update student attendance.',
+      });
+      if (currentSession) loadCentralizedData(currentSession.id);
+    } finally {
+      setUpdatingStudentId(null);
     }
-    setRollDraft(updated);
   };
 
-  const handleMarkAllAbsent = () => {
-    const updated: Record<string, 'Present' | 'Absent' | 'Excused'> = {};
-    for (const stu of sectionStudents) {
-      updated[stu.id] = 'Absent';
+  const handleLaunchQr = async () => {
+    if (!currentSession) return;
+    setIsLaunchingQr(true);
+    setFeedback(null);
+    try {
+      const { session } = await api.createQrSession({
+        classId: currentSession.id,
+        sectionId: currentSession.sectionId,
+        subjectId: currentSession.subjectId,
+        classroom: currentSession.classroom,
+      });
+      setActiveQrSession(session);
+      setFeedback({
+        type: 'success',
+        text: `Dynamic QR attendance session launched for ${currentSession.resolvedSubjectCode}. QR rotates every 5s.`,
+      });
+      if (onNavigate) {
+        onNavigate('qr-attendance');
+      } else {
+        await loadCentralizedData(currentSession.id);
+      }
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to launch QR attendance session.',
+      });
+    } finally {
+      setIsLaunchingQr(false);
     }
-    setRollDraft(updated);
+  };
+
+  const handleFinalizeClass = async () => {
+    if (!currentSession) return;
+    const pendingCount = centralizedSummary?.pendingCount ?? 0;
+    const confirmMsg = `Finalize attendance for ${currentSession.resolvedSubjectCode} (${currentSession.sectionDisplayName})?\n\n${
+      pendingCount > 0
+        ? `${pendingCount} pending/unrecorded students will be officially recorded as ABSENT.`
+        : 'All students are recorded. The official register will be marked conducted.'
+    }`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsFinalizing(true);
+    setFeedback(null);
+    try {
+      const res = await api.finalizeClassAttendance({ classId: currentSession.id });
+      setCentralizedRoster(res.roster);
+      setCentralizedSummary(res.summary);
+      setActiveQrSession(null);
+      setFeedback({
+        type: 'success',
+        text: `Class attendance finalized. ${res.finalizedCount} pending students marked Absent. Official records locked in MongoDB.`,
+      });
+      await onRefreshWorkspace();
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to finalize class attendance.',
+      });
+    } finally {
+      setIsFinalizing(false);
+    }
+  };
+
+  const handleMarkAllPresent = async () => {
+    if (!currentSession) return;
+    setSavingAttendance(true);
+    setFeedback(null);
+    try {
+      const payload = displayRoster.map((stu) => ({
+        studentId: stu.studentId,
+        status: 'Present' as const,
+      }));
+      await api.submitSessionAttendance(currentSession.id, {
+        topic: topicDraft.trim() || currentSession.topic,
+        attendance: payload,
+      });
+      await loadCentralizedData(currentSession.id);
+      await onRefreshWorkspace();
+      setFeedback({ type: 'success', text: 'All students marked Present in official register.' });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not mark all present.',
+      });
+    } finally {
+      setSavingAttendance(false);
+    }
+  };
+
+  const handleMarkAllAbsent = async () => {
+    if (!currentSession) return;
+    setSavingAttendance(true);
+    setFeedback(null);
+    try {
+      const payload = displayRoster.map((stu) => ({
+        studentId: stu.studentId,
+        status: 'Absent' as const,
+      }));
+      await api.submitSessionAttendance(currentSession.id, {
+        topic: topicDraft.trim() || currentSession.topic,
+        attendance: payload,
+      });
+      await loadCentralizedData(currentSession.id);
+      await onRefreshWorkspace();
+      setFeedback({ type: 'success', text: 'All students marked Absent in official register.' });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not mark all absent.',
+      });
+    } finally {
+      setSavingAttendance(false);
+    }
   };
 
   const handleSaveScheduledAttendance = async () => {
@@ -489,16 +747,17 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
     setSavingAttendance(true);
     setFeedback(null);
     try {
-      const payload = sectionStudents.map((stu) => ({
-        studentId: stu.id,
-        status: rollDraft[stu.id] || 'Present',
+      const payload = displayRoster.map((stu) => ({
+        studentId: stu.studentId,
+        status: (stu.status === 'Pending' ? 'Present' : stu.status) as 'Present' | 'Absent' | 'Excused',
       }));
       await api.submitSessionAttendance(currentSession.id, {
         topic: topicDraft.trim() || currentSession.topic,
         attendance: payload,
       });
+      await loadCentralizedData(currentSession.id);
       await onRefreshWorkspace();
-      setFeedback({ type: 'success', text: 'Attendance saved.' });
+      setFeedback({ type: 'success', text: 'Attendance register saved to MongoDB.' });
     } catch (err) {
       setFeedback({
         type: 'error',
@@ -655,11 +914,40 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
 
       {facultyTab === 'scheduled' && (
         <div className="space-y-5">
+          {/* Active Dynamic QR Beacon Banner */}
+          {activeQrSession && activeQrSession.status === 'ACTIVE' && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-md border border-emerald-300 bg-emerald-50/70 p-3.5 text-emerald-950">
+              <div className="flex items-center gap-2.5">
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-600"></span>
+                </span>
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-emerald-800">
+                    Live Dynamic QR Session Active
+                  </div>
+                  <div className="text-xs text-emerald-700">
+                    Cryptographic QR rotating every 5s · Students scanning phone camera appear below live without refresh
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigate && onNavigate('qr-attendance')}
+                className="inline-flex items-center gap-1.5 self-start sm:self-auto rounded bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 transition-colors shadow-sm"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                View Fullscreen QR Display
+              </button>
+            </div>
+          )}
+
+          {/* Class Session Selector & Topic Covered */}
           <div className="rounded-md border border-[#E3D2B4] bg-white p-4 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-medium text-[#6B5A4C] mb-1">
-                  Class Session
+                  Class Session (Centralized Roster)
                 </label>
                 <select
                   value={currentSession?.id || ''}
@@ -673,7 +961,7 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
                     <option key={s.id} value={s.id}>
                       {formatShortDate(s.date)} · {s.startTime}–{s.endTime} · {s.sectionDisplayName}{' '}
                       — {s.resolvedSubjectCode} {s.resolvedSubjectName} (
-                      {s.attendanceSubmitted ? 'Submitted' : 'Open'})
+                      {s.attendanceSubmitted ? 'Conducted' : 'Open'})
                     </option>
                   ))}
                 </select>
@@ -717,18 +1005,94 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
                   </span>
                 </div>
 
-                <div className="text-xs text-[#6B5A4C] tabular-nums">
-                  Present: <strong className="text-[#165B33]">{presentCount}</strong> · Absent:{' '}
-                  <strong className="text-[#B42318]">{absentCount}</strong>
+                <div className="flex items-center gap-2 text-xs text-[#6B5A4C]">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                  <span>Live 3s Polling Active</span>
                 </div>
               </div>
             )}
           </div>
 
+          {/* Centralized Attendance Live Summary Cards */}
+          {currentSession && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="rounded-md border border-[#E3D2B4] bg-white p-3">
+                <div className="text-[11px] font-semibold text-[#6B5A4C] uppercase tracking-wider">
+                  Total Enrolled
+                </div>
+                <div className="mt-1 text-2xl font-bold text-[#241710] tabular-nums">
+                  {centralizedSummary?.totalEnrolled ?? sectionStudents.length}
+                </div>
+                <div className="text-[10px] text-[#6B5A4C] mt-0.5">Official section cohort</div>
+              </div>
+
+              <div className="rounded-md border border-emerald-300 bg-emerald-50/50 p-3">
+                <div className="text-[11px] font-semibold text-emerald-800 uppercase tracking-wider">
+                  Present
+                </div>
+                <div className="mt-1 text-2xl font-bold text-emerald-700 tabular-nums">
+                  {centralizedSummary?.presentCount ?? 0}
+                </div>
+                <div className="text-[10px] text-emerald-700/80 mt-0.5">QR verified + manual</div>
+              </div>
+
+              <div className="rounded-md border border-rose-300 bg-rose-50/50 p-3">
+                <div className="text-[11px] font-semibold text-rose-800 uppercase tracking-wider">
+                  Absent
+                </div>
+                <div className="mt-1 text-2xl font-bold text-rose-700 tabular-nums">
+                  {centralizedSummary?.absentCount ?? 0}
+                </div>
+                <div className="text-[10px] text-rose-700/80 mt-0.5">Official absences</div>
+              </div>
+
+              <div className="rounded-md border border-amber-300 bg-amber-50/50 p-3">
+                <div className="text-[11px] font-semibold text-amber-800 uppercase tracking-wider">
+                  Excused
+                </div>
+                <div className="mt-1 text-2xl font-bold text-amber-700 tabular-nums">
+                  {centralizedSummary?.excusedCount ?? 0}
+                </div>
+                <div className="text-[10px] text-amber-700/80 mt-0.5">Institutional leave</div>
+              </div>
+
+              <div className="rounded-md border border-slate-300 bg-slate-50/70 p-3">
+                <div className="text-[11px] font-semibold text-slate-700 uppercase tracking-wider">
+                  Pending
+                </div>
+                <div className="mt-1 text-2xl font-bold text-slate-800 tabular-nums">
+                  {centralizedSummary?.pendingCount ?? sectionStudents.length}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Awaiting QR / roll-call</div>
+              </div>
+
+              <div className="rounded-md border border-[#E3D2B4] bg-[#FFFDF8] p-3 flex flex-col justify-between">
+                <div>
+                  <div className="text-[11px] font-semibold text-[#165B33] uppercase tracking-wider">
+                    Completion
+                  </div>
+                  <div className="mt-1 text-2xl font-bold text-[#165B33] tabular-nums">
+                    {centralizedSummary?.completionPercentage ?? 0}%
+                  </div>
+                </div>
+                <div className="w-full bg-[#E3D2B4]/40 rounded-full h-1.5 mt-2 overflow-hidden">
+                  <div
+                    className="bg-[#165B33] h-1.5 rounded-full transition-all duration-500"
+                    style={{ width: `${centralizedSummary?.completionPercentage ?? 0}%` }}
+                  ></div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {currentSession ? (
             <div className="space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="relative w-full sm:w-72">
+              {/* Toolbar & Action Buttons */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div className="relative w-full lg:w-72">
                   <Search className="w-4 h-4 text-[#6B5A4C] absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
@@ -742,92 +1106,200 @@ export const MyAttendanceView: React.FC<MyAttendanceViewProps> = ({
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
+                    disabled={isLaunchingQr}
+                    onClick={handleLaunchQr}
+                    className="inline-flex items-center gap-1.5 rounded bg-[#165B33] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#104526] disabled:opacity-50 transition-colors shadow-sm whitespace-nowrap"
+                  >
+                    <QrCode className="w-4 h-4" />
+                    {isLaunchingQr ? 'Starting QR…' : 'Launch Dynamic QR for this Class'}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isFinalizing}
+                    onClick={handleFinalizeClass}
+                    className="inline-flex items-center gap-1.5 rounded border border-[#DF6A24] bg-[#FFFDF8] px-3 py-2 text-xs font-semibold text-[#DF6A24] hover:bg-[#FAF3E3] disabled:opacity-50 transition-colors whitespace-nowrap"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    {isFinalizing ? 'Finalizing…' : 'Finalize Class (Mark Pending as Absent)'}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={savingAttendance}
                     onClick={handleMarkAllPresent}
                     className="rounded border border-[#E3D2B4] bg-[#FFFDF8] px-3 py-2 text-xs font-medium text-[#241710] hover:bg-[#FAF3E3] whitespace-nowrap"
                   >
                     Mark All Present
                   </button>
+
                   <button
                     type="button"
+                    disabled={savingAttendance}
                     onClick={handleMarkAllAbsent}
                     className="rounded border border-[#E3D2B4] bg-[#FFFDF8] px-3 py-2 text-xs font-medium text-[#241710] hover:bg-[#FAF3E3] whitespace-nowrap"
                   >
                     Mark All Absent
                   </button>
-                  <button
-                    type="button"
-                    disabled={savingAttendance || sectionStudents.length === 0}
-                    onClick={handleSaveScheduledAttendance}
-                    className="rounded bg-[#165B33] px-4 py-2 text-xs font-medium text-white hover:bg-[#104526] disabled:opacity-50 whitespace-nowrap"
-                  >
-                    {savingAttendance ? 'Saving…' : 'Save Attendance'}
-                  </button>
                 </div>
               </div>
 
+              {/* Centralized Attendance Register Table */}
               <div className="overflow-x-auto rounded-md border border-[#E3D2B4] bg-white">
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-[#E3D2B4] bg-[#FFFDF8] text-xs font-semibold text-[#6B5A4C]">
-                      <th className="py-3 px-4 w-44">USN</th>
+                      <th className="py-3 px-4 w-36">USN</th>
                       <th className="py-3 px-4">Student Name</th>
-                      <th className="py-3 px-4 text-right">Attendance</th>
+                      <th className="py-3 px-4 hidden md:table-cell">Section</th>
+                      <th className="py-3 px-4">Current Status</th>
+                      <th className="py-3 px-4">Recording Method</th>
+                      <th className="py-3 px-4 hidden sm:table-cell">Marked Time</th>
+                      <th className="py-3 px-4 text-right">Register Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#E3D2B4] text-sm">
-                    {visibleStudents.length === 0 ? (
+                    {displayRoster.length === 0 ? (
                       <tr>
-                        <td colSpan={3} className="py-8 px-4 text-center text-[#6B5A4C]">
-                          No students match your search.
+                        <td colSpan={7} className="py-8 px-4 text-center text-[#6B5A4C]">
+                          No students found matching your criteria.
                         </td>
                       </tr>
                     ) : (
-                      visibleStudents.map((stu) => {
-                        const status = rollDraft[stu.id] || 'Present';
+                      displayRoster.map((item) => {
+                        const isUpdating = updatingStudentId === item.studentId;
+                        const status = item.status;
+                        const formattedTime = item.timestamp
+                          ? new Date(item.timestamp).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })
+                          : '—';
+
                         return (
-                          <tr key={stu.id} className="hover:bg-[#FAF3E3]/55">
-                            <td className="py-3 px-4 font-mono text-xs text-[#241710] whitespace-nowrap">
-                              {stu.identifier}
+                          <tr key={item.studentId} className="hover:bg-[#FAF3E3]/40 transition-colors">
+                            {/* USN */}
+                            <td className="py-3 px-4 font-mono text-xs font-bold text-[#241710] whitespace-nowrap">
+                              {item.studentIdentifier}
                             </td>
-                            <td className="py-3 px-4 font-medium text-[#241710]">{stu.name}</td>
+
+                            {/* Student Name & Conflict Warning */}
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-[#241710]">{item.studentName}</div>
+                              {item.conflictAlert && (
+                                <div className="mt-1 text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-0.5 flex items-center justify-between gap-2">
+                                  <span className="flex items-center gap-1 font-medium">
+                                    <ShieldAlert className="w-3.5 h-3.5 text-amber-700" />
+                                    {item.conflictAlert}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleSingleStatus(item.studentId, 'Present')}
+                                    className="text-[11px] font-bold text-emerald-800 underline hover:text-emerald-950"
+                                  >
+                                    Accept QR (Mark Present)
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+
+                            {/* Section */}
+                            <td className="py-3 px-4 text-xs text-[#6B5A4C] hidden md:table-cell whitespace-nowrap">
+                              {item.sectionDisplayName}
+                            </td>
+
+                            {/* Current Status Badge */}
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {status === 'Present' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                  PRESENT
+                                </span>
+                              )}
+                              {status === 'Absent' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-100 text-rose-800 border border-rose-300">
+                                  <XCircle className="w-3.5 h-3.5 text-rose-600" />
+                                  ABSENT
+                                </span>
+                              )}
+                              {status === 'Excused' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                                  EXCUSED
+                                </span>
+                              )}
+                              {status === 'Pending' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-dashed border-slate-300">
+                                  <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                  NOT RECORDED
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Recording Method Badge */}
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {item.verificationMethod === 'QR' && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold tracking-wide bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                  <QrCode className="w-3.5 h-3.5 text-emerald-600" />
+                                  QR VERIFIED
+                                </span>
+                              )}
+                              {item.verificationMethod === 'Manual' && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold tracking-wide bg-blue-50 text-blue-800 border border-blue-200">
+                                  <UserCheck className="w-3.5 h-3.5 text-blue-600" />
+                                  MANUAL
+                                </span>
+                              )}
+                              {item.verificationMethod === 'None' && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-slate-400 bg-slate-50 border border-slate-200">
+                                  <Clock className="w-3 h-3 text-slate-400" />
+                                  PENDING
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Marked Time */}
+                            <td className="py-3 px-4 text-xs font-mono text-[#6B5A4C] hidden sm:table-cell whitespace-nowrap">
+                              {formattedTime}
+                            </td>
+
+                            {/* Register Actions (3-way toggle) */}
                             <td className="py-3 px-4 text-right whitespace-nowrap">
                               <div className="inline-flex rounded border border-[#E3D2B4] bg-[#FAF3E3] p-0.5">
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    setRollDraft((prev) => ({ ...prev, [stu.id]: 'Present' }))
-                                  }
-                                  className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                                  disabled={isUpdating}
+                                  onClick={() => handleToggleSingleStatus(item.studentId, 'Present')}
+                                  className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
                                     status === 'Present'
-                                      ? 'bg-[#165B33] text-white'
+                                      ? 'bg-[#165B33] text-white shadow-sm'
                                       : 'text-[#6B5A4C] hover:text-[#241710]'
-                                  }`}
+                                  } disabled:opacity-50`}
                                 >
                                   Present
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    setRollDraft((prev) => ({ ...prev, [stu.id]: 'Absent' }))
-                                  }
-                                  className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                                  disabled={isUpdating}
+                                  onClick={() => handleToggleSingleStatus(item.studentId, 'Absent')}
+                                  className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
                                     status === 'Absent'
-                                      ? 'bg-[#B42318] text-white'
+                                      ? 'bg-[#B42318] text-white shadow-sm'
                                       : 'text-[#6B5A4C] hover:text-[#241710]'
-                                  }`}
+                                  } disabled:opacity-50`}
                                 >
                                   Absent
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    setRollDraft((prev) => ({ ...prev, [stu.id]: 'Excused' }))
-                                  }
-                                  className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                                  disabled={isUpdating}
+                                  onClick={() => handleToggleSingleStatus(item.studentId, 'Excused')}
+                                  className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
                                     status === 'Excused'
-                                      ? 'bg-[#DF6A24] text-white'
+                                      ? 'bg-[#DF6A24] text-white shadow-sm'
                                       : 'text-[#6B5A4C] hover:text-[#241710]'
-                                  }`}
+                                  } disabled:opacity-50`}
                                 >
                                   Excused
                                 </button>

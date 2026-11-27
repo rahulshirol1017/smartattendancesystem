@@ -5,6 +5,8 @@ import {
   AttendanceCorrectionRequest,
   AttendanceRecord,
   AttendanceSubmissionAttempt,
+  CentralizedAttendanceRosterItem,
+  CentralizedAttendanceSummary,
   ClassSession,
   ClassSessionType,
   ConflictDetail,
@@ -13,6 +15,7 @@ import {
   InstitutionalPolicy,
   QRAttendanceSession,
   RandomInClassVerification,
+  RecordSource,
   StudentDeviceBinding,
   SubjectItem,
   TimetableEntry,
@@ -369,6 +372,73 @@ export const api = {
     );
   },
 
+  // Centralized Attendance: Unified roster & summary
+  getClassAttendance(classId: string): Promise<{
+    classSession: ClassSession;
+    qrSession?: QRAttendanceSession | null;
+    roster: CentralizedAttendanceRosterItem[];
+    summary: CentralizedAttendanceSummary;
+  }> {
+    return requestJson<{
+      classSession: ClassSession;
+      qrSession?: QRAttendanceSession | null;
+      roster: CentralizedAttendanceRosterItem[];
+      summary: CentralizedAttendanceSummary;
+    }>(`/api/attendance/class/${classId}`);
+  },
+
+  // Centralized Attendance: Manually update/toggle a single student record
+  updateSingleAttendance(payload: {
+    classId: string;
+    studentId: string;
+    status: 'Present' | 'Absent' | 'Excused';
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    record: AttendanceRecord;
+    actionTaken: string;
+    conflictDetected?: boolean;
+    conflictReason?: string;
+    summary: CentralizedAttendanceSummary;
+    roster: CentralizedAttendanceRosterItem[];
+  }> {
+    return requestJson<{
+      success: boolean;
+      record: AttendanceRecord;
+      actionTaken: string;
+      conflictDetected?: boolean;
+      conflictReason?: string;
+      summary: CentralizedAttendanceSummary;
+      roster: CentralizedAttendanceRosterItem[];
+    }>('/api/attendance/update-single', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // Centralized Attendance: Finalize class attendance (mark unrecorded pending as Absent)
+  finalizeClassAttendance(payload: {
+    classId: string;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    finalizedCount: number;
+    summary: CentralizedAttendanceSummary;
+    roster: CentralizedAttendanceRosterItem[];
+    classSession: ClassSession;
+  }> {
+    return requestJson<{
+      success: boolean;
+      finalizedCount: number;
+      summary: CentralizedAttendanceSummary;
+      roster: CentralizedAttendanceRosterItem[];
+      classSession: ClassSession;
+    }>('/api/attendance/finalize-class', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   recordClassSession(payload: {
     sectionId: string;
     subjectId: string;
@@ -720,8 +790,9 @@ export const api = {
   // --- Dynamic QR Attendance & Geofencing ---
 
   createQrSession(params: {
-    sectionId: string;
-    subjectId: string;
+    classId?: string;
+    sectionId?: string;
+    subjectId?: string;
     durationMinutes?: number;
     classroom?: string;
     hostLatitude?: number;

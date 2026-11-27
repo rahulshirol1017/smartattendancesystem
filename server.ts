@@ -1671,6 +1671,118 @@ async function startServer(): Promise<void> {
     }
   );
 
+  // Centralized Attendance: Get complete unified roster & summary for a class session
+  app.get(
+    '/api/attendance/class/:classId',
+    requireAuth,
+    requireRoles('faculty', 'admin'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { classId } = req.params;
+      try {
+        const data = await repo.getClassAttendanceRoster(classId);
+        res.json(data);
+      } catch (err) {
+        res.status(404).json({
+          error: err instanceof Error ? err.message : 'Class session not found.',
+        });
+      }
+    }
+  );
+
+  // Centralized Attendance: Manually update/toggle an individual student's attendance status
+  app.post(
+    '/api/attendance/update-single',
+    requireAuth,
+    requireRoles('faculty', 'admin'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = req.user!;
+      const { classId, studentId, status, reason } = req.body as {
+        classId?: string;
+        studentId?: string;
+        status?: 'Present' | 'Absent' | 'Excused';
+        reason?: string;
+      };
+
+      if (!classId || !studentId || !status) {
+        res.status(400).json({ error: 'classId, studentId, and status are required.' });
+        return;
+      }
+
+      if (!['Present', 'Absent', 'Excused'].includes(status)) {
+        res.status(400).json({ error: 'Invalid attendance status. Must be Present, Absent, or Excused.' });
+        return;
+      }
+
+      try {
+        const result = await repo.createOrUpdateAttendanceRecord({
+          classId,
+          studentId,
+          status,
+          recordSource: 'Faculty Register',
+          actor,
+          reason: reason || `Manual status update to ${status} via Centralized Attendance Register.`,
+        });
+
+        const updated = await repo.getClassAttendanceRoster(classId);
+
+        res.json({
+          success: true,
+          record: result.record,
+          actionTaken: result.actionTaken,
+          conflictDetected: result.conflictDetected,
+          conflictReason: result.conflictReason,
+          summary: updated.summary,
+          roster: updated.roster,
+        });
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Unable to update student attendance.',
+        });
+      }
+    }
+  );
+
+  // Centralized Attendance: Finalize class attendance (automatically marks unrecorded students as Absent)
+  app.post(
+    '/api/attendance/finalize-class',
+    requireAuth,
+    requireRoles('faculty', 'admin'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = req.user!;
+      const { classId, reason } = req.body as {
+        classId?: string;
+        reason?: string;
+      };
+
+      if (!classId) {
+        res.status(400).json({ error: 'classId is required to finalize class attendance.' });
+        return;
+      }
+
+      try {
+        const result = await repo.finalizeClassAttendance({
+          classId,
+          actor,
+          reason,
+        });
+
+        const updated = await repo.getClassAttendanceRoster(classId);
+
+        res.json({
+          success: true,
+          finalizedCount: result.finalizedCount,
+          summary: updated.summary,
+          roster: updated.roster,
+          classSession: result.classSession,
+        });
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Unable to finalize class attendance.',
+        });
+      }
+    }
+  );
+
   // Create and immediately record a new class session for an authorized (sectionId, subjectId)
   app.post(
     '/api/faculty/classes',
@@ -4455,6 +4567,7 @@ async function startServer(): Promise<void> {
     async (req: AuthenticatedRequest, res: Response) => {
       const actor = req.user!;
       const {
+        classId,
         sectionId,
         subjectId,
         durationMinutes,
@@ -4463,6 +4576,7 @@ async function startServer(): Promise<void> {
         hostLongitude,
         hostAccuracy,
       } = req.body as {
+        classId?: string;
         sectionId?: string;
         subjectId?: string;
         durationMinutes?: number;
@@ -4472,8 +4586,18 @@ async function startServer(): Promise<void> {
         hostAccuracy?: number;
       };
 
-      if (!sectionId || !subjectId) {
-        res.status(400).json({ error: 'Section ID and Subject ID are required.' });
+      let resolvedSectionId = sectionId;
+      let resolvedSubjectId = subjectId;
+      if (classId && (!resolvedSectionId || !resolvedSubjectId)) {
+        const cls = await repo.getClassById(classId);
+        if (cls) {
+          resolvedSectionId = resolvedSectionId || cls.sectionId;
+          resolvedSubjectId = resolvedSubjectId || cls.subjectId;
+        }
+      }
+
+      if (!resolvedSectionId || !resolvedSubjectId) {
+        res.status(400).json({ error: 'Section ID and Subject ID (or valid classId) are required.' });
         return;
       }
 
@@ -4493,7 +4617,7 @@ async function startServer(): Promise<void> {
       // Authorization check: faculty must be assigned to this section and subject
       if (actor.role === 'faculty') {
         const assignments = await repo.getFacultyAssignments();
-        if (!isFacultyAuthorizedForPair(actor.id, sectionId, subjectId, assignments)) {
+        if (!isFacultyAuthorizedForPair(actor.id, resolvedSectionId, resolvedSubjectId, assignments)) {
           res.status(403).json({
             error: 'You are not assigned to teach this section and subject.',
           });
@@ -4503,8 +4627,9 @@ async function startServer(): Promise<void> {
 
       try {
         const session = await repo.createQrSession({
-          sectionId,
-          subjectId,
+          classId: classId?.trim() || undefined,
+          sectionId: resolvedSectionId,
+          subjectId: resolvedSubjectId,
           faculty: actor,
           durationMinutes: durationMinutes ? Number(durationMinutes) : undefined,
           classroom,

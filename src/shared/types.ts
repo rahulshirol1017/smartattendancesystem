@@ -260,6 +260,29 @@ export interface IdentifyFaceResponse {
   message: string;
 }
 
+export interface CentralizedAttendanceRosterItem {
+  studentId: string;
+  studentName: string;
+  studentIdentifier: string;
+  sectionDisplayName: string;
+  record?: AttendanceRecord;
+  status: 'Present' | 'Absent' | 'Excused' | 'Pending';
+  recordSource?: RecordSource;
+  timestamp?: string;
+  recordedByName?: string;
+  conflictAlert?: string;
+  verificationMethod: 'QR' | 'Manual' | 'None';
+}
+
+export interface CentralizedAttendanceSummary {
+  totalEnrolled: number;
+  presentCount: number;
+  absentCount: number;
+  excusedCount: number;
+  pendingCount: number;
+  completionPercentage: number;
+}
+
 export interface SubjectItem {
   id: string;
   code: string;

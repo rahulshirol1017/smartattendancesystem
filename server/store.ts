@@ -32,16 +32,19 @@ import {
   AttendanceAuditLog,
   AttendanceCorrectionRequest,
   AttendanceRecord,
+  AttendanceStatus,
   AttendanceSubmissionAttempt,
   ClassSession,
   FacultyAssignment,
   InstitutionalPolicy,
   QRAttendanceSession,
   RandomInClassVerification,
+  RecordSource,
   StudentDeviceBinding,
   SubjectItem,
   TimetableEntry,
   UserProfile,
+  UserRole,
   VerificationClassification,
 } from '../src/shared/types.ts';
 
@@ -839,64 +842,567 @@ export class DataRepository {
     return this.state.records.find((r) => r.id === recordId) || null;
   }
 
+  public async getRecordsForClass(classId: string): Promise<AttendanceRecord[]> {
+    if (this.mode === 'mongodb') {
+      const docs = await AttendanceRecordModel.find({
+        $or: [{ classId }, { attendanceSessionId: classId }],
+      }).lean();
+      return docs as unknown as AttendanceRecord[];
+    }
+    return this.state.records.filter(
+      (r) => r.classId === classId || r.attendanceSessionId === classId
+    );
+  }
+
+  public async createOrUpdateAttendanceRecord(params: {
+    classId: string;
+    studentId: string;
+    status: 'Present' | 'Absent' | 'Excused';
+    recordSource: RecordSource;
+    actor: { id: string; name: string; role: string };
+    isQrVerification?: boolean;
+    reason?: string;
+  }): Promise<{
+    record: AttendanceRecord;
+    conflictDetected?: boolean;
+    conflictReason?: string;
+    actionTaken: 'CREATED' | 'UPDATED' | 'BLOCKED_CONFLICT';
+  }> {
+    const classSession = await this.getClassById(params.classId);
+    if (!classSession) {
+      throw new Error(`Class session ${params.classId} not found.`);
+    }
+
+    const student =
+      (await this.findUserById(params.studentId)) ||
+      (await this.findUserByIdentifier(params.studentId));
+    if (!student) {
+      throw new Error(`Student ${params.studentId} not found.`);
+    }
+
+    // Check existing record for this student and class session
+    let existingRecord: AttendanceRecord | null = null;
+    if (this.mode === 'mongodb') {
+      const doc = await AttendanceRecordModel.findOne({
+        studentId: params.studentId,
+        $or: [{ classId: params.classId }, { attendanceSessionId: params.classId }],
+      }).lean();
+      if (doc) existingRecord = doc as unknown as AttendanceRecord;
+    } else {
+      existingRecord =
+        this.state.records.find(
+          (r) =>
+            r.studentId === params.studentId &&
+            (r.classId === params.classId || r.attendanceSessionId === params.classId)
+        ) || null;
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Conflict Policy: If student scans QR, but teacher ALREADY manually marked them Absent or Excused
+    if (existingRecord) {
+      if (params.isQrVerification) {
+        if (
+          (existingRecord.status === 'Absent' || existingRecord.status === 'Excused') &&
+          existingRecord.recordSource === 'Faculty Register'
+        ) {
+          // Do not silently overwrite teacher's manual marking!
+          return {
+            record: existingRecord,
+            conflictDetected: true,
+            conflictReason: `Manual attendance record conflict: Faculty has already marked this student ${existingRecord.status.toUpperCase()} manually. QR scan cannot silently overwrite official register.`,
+            actionTaken: 'BLOCKED_CONFLICT',
+          };
+        }
+        // If already present, return existing
+        if (existingRecord.status === 'Present') {
+          return {
+            record: existingRecord,
+            conflictDetected: false,
+            actionTaken: 'UPDATED',
+          };
+        }
+      }
+
+      // Teacher manual update or QR update if allowed
+      const previousStatus = existingRecord.status;
+      const updatedRecord: AttendanceRecord = {
+        ...existingRecord,
+        status: params.status,
+        effectivePresent: params.status !== 'Absent',
+        recordSource: params.recordSource,
+        recordedById: params.actor.id,
+        recordedByName: params.actor.name,
+        timestamp: now,
+        correctionVersion: (existingRecord.correctionVersion || 0) + 1,
+      };
+
+      if (this.mode === 'mongodb') {
+        await AttendanceRecordModel.updateOne(
+          { id: existingRecord.id },
+          {
+            $set: {
+              status: updatedRecord.status,
+              effectivePresent: updatedRecord.effectivePresent,
+              recordSource: updatedRecord.recordSource,
+              recordedById: updatedRecord.recordedById,
+              recordedByName: updatedRecord.recordedByName,
+              timestamp: updatedRecord.timestamp,
+              correctionVersion: updatedRecord.correctionVersion,
+            },
+          }
+        );
+      } else {
+        const idx = this.state.records.findIndex((r) => r.id === existingRecord!.id);
+        if (idx !== -1) {
+          this.state.records[idx] = updatedRecord;
+          this.persistLocal();
+        }
+      }
+
+      await this.appendAuditLog({
+        id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        category: 'ATTENDANCE_RECORD',
+        attendanceRecordId: updatedRecord.id,
+        sectionId: classSession.sectionId,
+        sectionDisplayName: classSession.sectionDisplayName,
+        subjectId: classSession.subjectId,
+        subjectCode: classSession.subjectCode || 'SUBJECT',
+        subjectName: classSession.subjectName || classSession.topic,
+        classId: classSession.id,
+        classDate: classSession.date,
+        classPeriod: classSession.period,
+        studentId: student.id,
+        studentName: student.name,
+        studentIdentifier: student.identifier,
+        previousValue: previousStatus,
+        newValue: params.status,
+        previousVersion: existingRecord.correctionVersion || 0,
+        newVersion: updatedRecord.correctionVersion,
+        action: params.isQrVerification ? 'QR_ATTENDANCE_VERIFIED' : 'MANUAL_RECORD_UPDATED',
+        actorId: params.actor.id,
+        actorName: params.actor.name,
+        actorRole: params.actor.role as UserRole,
+        reason:
+          params.reason ||
+          (params.isQrVerification
+            ? 'Facial verification and liveness confirmed via dynamic QR.'
+            : `Manual attendance status updated to ${params.status} via Centralized Attendance Register.`),
+        evidenceReference: `Class ${classSession.id} (${params.recordSource})`,
+        timestamp: now,
+      });
+
+      return {
+        record: updatedRecord,
+        conflictDetected: false,
+        actionTaken: 'UPDATED',
+      };
+    }
+
+    // 2. Insert new record
+    const newRecordId = `rec-${params.studentId}-${params.classId}`;
+    const newRecord: AttendanceRecord = {
+      id: newRecordId,
+      studentId: params.studentId,
+      classId: params.classId,
+      attendanceSessionId: params.classId,
+      sectionId: classSession.sectionId,
+      subjectId: classSession.subjectId,
+      status: params.status,
+      effectivePresent: params.status !== 'Absent',
+      originalStatus: params.status,
+      recordSource: params.recordSource,
+      recordedById: params.actor.id,
+      recordedByName: params.actor.name,
+      timestamp: now,
+      correctionVersion: 0,
+    };
+
+    if (this.mode === 'mongodb') {
+      try {
+        await AttendanceRecordModel.create(newRecord);
+      } catch (err: any) {
+        // Handle race conditions where another request just inserted
+        const existingDoc = await AttendanceRecordModel.findOne({
+          studentId: params.studentId,
+          $or: [{ classId: params.classId }, { attendanceSessionId: params.classId }],
+        }).lean();
+        if (existingDoc) {
+          return {
+            record: existingDoc as unknown as AttendanceRecord,
+            conflictDetected: false,
+            actionTaken: 'UPDATED',
+          };
+        }
+        throw err;
+      }
+    } else {
+      const dup = this.state.records.find(
+        (r) =>
+          r.studentId === params.studentId &&
+          (r.classId === params.classId || r.attendanceSessionId === params.classId)
+      );
+      if (dup) {
+        return {
+          record: dup,
+          conflictDetected: false,
+          actionTaken: 'UPDATED',
+        };
+      }
+      this.state.records.push(newRecord);
+      this.persistLocal();
+    }
+
+    await this.appendAuditLog({
+      id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      category: 'ATTENDANCE_RECORD',
+      attendanceRecordId: newRecord.id,
+      sectionId: classSession.sectionId,
+      sectionDisplayName: classSession.sectionDisplayName,
+      subjectId: classSession.subjectId,
+      subjectCode: classSession.subjectCode || 'SUBJECT',
+      subjectName: classSession.subjectName || classSession.topic,
+      classId: classSession.id,
+      classDate: classSession.date,
+      classPeriod: classSession.period,
+      studentId: student.id,
+      studentName: student.name,
+      studentIdentifier: student.identifier,
+      previousValue: 'None',
+      newValue: params.status,
+      previousVersion: 0,
+      newVersion: 1,
+      action: params.isQrVerification ? 'QR_ATTENDANCE_RECORDED' : 'MANUAL_ATTENDANCE_RECORDED',
+      actorId: params.actor.id,
+      actorName: params.actor.name,
+      actorRole: params.actor.role as UserRole,
+      reason:
+        params.reason ||
+        (params.isQrVerification
+          ? 'Facial verification and liveness confirmed via dynamic QR.'
+          : `Official register entry recorded as ${params.status}.`),
+      evidenceReference: `Class ${classSession.id} (${params.recordSource})`,
+      timestamp: now,
+    });
+
+    return {
+      record: newRecord,
+      conflictDetected: false,
+      actionTaken: 'CREATED',
+    };
+  }
+
+  public async finalizeClassAttendance(params: {
+    classId: string;
+    actor: { id: string; name: string; role: string };
+    reason?: string;
+  }): Promise<{
+    finalizedCount: number;
+    presentCount: number;
+    absentCount: number;
+    excusedCount: number;
+    totalEnrolled: number;
+    classSession: ClassSession;
+  }> {
+    const classSession = await this.getClassById(params.classId);
+    if (!classSession) {
+      throw new Error(`Class session ${params.classId} not found.`);
+    }
+
+    // Find all active enrolled students for this section
+    const enrolledStudents = (await this.listAllUsers()).filter(
+      (u) =>
+        u.role === 'student' &&
+        u.sectionId === classSession.sectionId &&
+        u.accountStatus === 'Active'
+    );
+
+    // Get all existing records for this class
+    const existingRecords = await this.getRecordsForClass(params.classId);
+    const recordedStudentIds = new Set(existingRecords.map((r) => r.studentId));
+
+    let finalizedCount = 0;
+    const now = new Date().toISOString();
+
+    for (const stu of enrolledStudents) {
+      if (!recordedStudentIds.has(stu.id)) {
+        await this.createOrUpdateAttendanceRecord({
+          classId: classSession.id,
+          studentId: stu.id,
+          status: 'Absent',
+          recordSource: 'Faculty Register',
+          actor: params.actor,
+          reason: params.reason || 'Class attendance finalized: unrecorded student marked Absent.',
+        });
+        finalizedCount++;
+      }
+    }
+
+    // Mark class session as Conducted and attendanceSubmitted: true
+    const updatedClassSession = await this.updateClassSession(classSession.id, {
+      status: 'Conducted',
+      attendanceSubmitted: true,
+    });
+
+    // Close any active QR session for this classId or section/subject
+    if (this.mode === 'mongodb') {
+      await QRAttendanceSessionModel.updateMany(
+        {
+          $or: [
+            { classId: classSession.id, status: 'ACTIVE' },
+            { sectionId: classSession.sectionId, subjectId: classSession.subjectId, status: 'ACTIVE' },
+          ],
+        },
+        { $set: { status: 'CLOSED', closedAt: now } }
+      );
+    } else {
+      for (const qs of this.state.qrSessions) {
+        if (
+          qs.status === 'ACTIVE' &&
+          (qs.classId === classSession.id ||
+            (qs.sectionId === classSession.sectionId && qs.subjectId === classSession.subjectId))
+        ) {
+          qs.status = 'CLOSED';
+          qs.closedAt = now;
+        }
+      }
+      this.persistLocal();
+    }
+
+    const allFinalRecords = await this.getRecordsForClass(params.classId);
+    const presentCount = allFinalRecords.filter((r) => r.status === 'Present').length;
+    const absentCount = allFinalRecords.filter((r) => r.status === 'Absent').length;
+    const excusedCount = allFinalRecords.filter((r) => r.status === 'Excused').length;
+
+    await this.appendAuditLog({
+      id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      category: 'ATTENDANCE_RECORD',
+      attendanceRecordId: classSession.id,
+      sectionId: classSession.sectionId,
+      sectionDisplayName: classSession.sectionDisplayName,
+      subjectId: classSession.subjectId,
+      subjectCode: classSession.subjectCode || 'SUBJECT',
+      subjectName: classSession.subjectName || classSession.topic,
+      classId: classSession.id,
+      classDate: classSession.date,
+      classPeriod: classSession.period,
+      studentId: 'section-roll',
+      studentName: `${classSession.sectionDisplayName} (${enrolledStudents.length} students)`,
+      studentIdentifier: classSession.sectionDisplayName,
+      previousValue: 'Ongoing Attendance',
+      newValue: `Finalized (${presentCount} Present, ${absentCount} Absent, ${excusedCount} Excused)`,
+      previousVersion: 0,
+      newVersion: 1,
+      action: 'CLASS_ATTENDANCE_FINALIZED',
+      actorId: params.actor.id,
+      actorName: params.actor.name,
+      actorRole: params.actor.role as UserRole,
+      reason:
+        params.reason ||
+        `Official class register finalized with ${finalizedCount} pending students marked Absent.`,
+      evidenceReference: `Class ${classSession.id} (${classSession.sessionType})`,
+      timestamp: now,
+    });
+
+    return {
+      finalizedCount,
+      presentCount,
+      absentCount,
+      excusedCount,
+      totalEnrolled: enrolledStudents.length,
+      classSession: updatedClassSession || classSession,
+    };
+  }
+
+  public async getClassAttendanceRoster(classId: string): Promise<{
+    classSession: ClassSession;
+    qrSession?: QRAttendanceSession | null;
+    roster: Array<{
+      studentId: string;
+      studentName: string;
+      studentIdentifier: string;
+      sectionDisplayName: string;
+      record?: AttendanceRecord;
+      status: 'Present' | 'Absent' | 'Excused' | 'Pending';
+      recordSource?: RecordSource;
+      timestamp?: string;
+      recordedByName?: string;
+      conflictAlert?: string;
+      verificationMethod: 'QR' | 'Manual' | 'None';
+    }>;
+    summary: {
+      totalEnrolled: number;
+      presentCount: number;
+      absentCount: number;
+      excusedCount: number;
+      pendingCount: number;
+      completionPercentage: number;
+    };
+  }> {
+    const classSession = await this.getClassById(classId);
+    if (!classSession) {
+      throw new Error(`Class session ${classId} not found.`);
+    }
+
+    const enrolledStudents = (await this.listAllUsers())
+      .filter(
+        (u) =>
+          u.role === 'student' &&
+          u.sectionId === classSession.sectionId &&
+          u.accountStatus === 'Active'
+      )
+      .sort((a, b) => a.identifier.localeCompare(b.identifier));
+
+    const records = await this.getRecordsForClass(classId);
+    const recordByStudent = new Map<string, AttendanceRecord>();
+    for (const r of records) {
+      recordByStudent.set(r.studentId, r);
+    }
+
+    // Check for linked QR session
+    let qrSession: QRAttendanceSession | null = null;
+    if (this.mode === 'mongodb') {
+      const doc = await QRAttendanceSessionModel.findOne({
+        $or: [
+          { classId },
+          { sectionId: classSession.sectionId, subjectId: classSession.subjectId, status: 'ACTIVE' },
+        ],
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+      if (doc) qrSession = doc as unknown as QRAttendanceSession;
+    } else {
+      qrSession =
+        this.state.qrSessions
+          .filter(
+            (s) =>
+              s.classId === classId ||
+              (s.sectionId === classSession.sectionId &&
+                s.subjectId === classSession.subjectId &&
+                s.status === 'ACTIVE')
+          )
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null;
+    }
+
+    // Check recent attempts for conflict review alerts
+    const sessionId = qrSession?.id;
+    let attempts: AttendanceSubmissionAttempt[] = [];
+    if (sessionId) {
+      attempts = await this.listAttendanceAttempts(sessionId);
+    }
+
+    const attemptConflictMap = new Map<string, string>();
+    for (const a of attempts) {
+      if (
+        a.classification === 'REVIEW_REQUIRED' ||
+        (a.suspiciousSignals && a.suspiciousSignals.length > 0)
+      ) {
+        attemptConflictMap.set(
+          a.studentId,
+          a.rejectionOrReviewReason || a.suspiciousSignals?.join('; ') || 'Review required'
+        );
+      }
+    }
+
+    let presentCount = 0;
+    let absentCount = 0;
+    let excusedCount = 0;
+    let pendingCount = 0;
+
+    const roster = enrolledStudents.map((stu) => {
+      const rec = recordByStudent.get(stu.id);
+      let status: 'Present' | 'Absent' | 'Excused' | 'Pending' = 'Pending';
+      let verificationMethod: 'QR' | 'Manual' | 'None' = 'None';
+      let recordSource: RecordSource | undefined = undefined;
+
+      if (rec) {
+        status = rec.status as 'Present' | 'Absent' | 'Excused';
+        recordSource = rec.recordSource;
+        if (rec.recordSource === 'QR Geoverified') {
+          verificationMethod = 'QR';
+        } else {
+          verificationMethod = 'Manual';
+        }
+      }
+
+      if (status === 'Present') presentCount++;
+      else if (status === 'Absent') absentCount++;
+      else if (status === 'Excused') excusedCount++;
+      else pendingCount++;
+
+      return {
+        studentId: stu.id,
+        studentName: stu.name,
+        studentIdentifier: stu.identifier,
+        sectionDisplayName: stu.sectionDisplayName || classSession.sectionDisplayName,
+        record: rec,
+        status,
+        recordSource,
+        timestamp: rec?.timestamp,
+        recordedByName: rec?.recordedByName,
+        conflictAlert: attemptConflictMap.get(stu.id),
+        verificationMethod,
+      };
+    });
+
+    const totalEnrolled = enrolledStudents.length;
+    const recordedTotal = presentCount + absentCount + excusedCount;
+    const completionPercentage =
+      totalEnrolled > 0 ? Math.round((recordedTotal / totalEnrolled) * 100) : 0;
+
+    return {
+      classSession,
+      qrSession,
+      roster,
+      summary: {
+        totalEnrolled,
+        presentCount,
+        absentCount,
+        excusedCount,
+        pendingCount,
+        completionPercentage,
+      },
+    };
+  }
+
   public async submitAttendanceForExistingSession(
     sessionId: string,
     newRecords: AttendanceRecord[],
-    topicUpdate?: string
+    topicUpdate?: string,
+    actor?: { id: string; name: string; role: string }
   ): Promise<ClassSession> {
     const existing = await this.getClassById(sessionId);
     if (!existing) {
       throw new Error('Class session not found.');
     }
-    if (existing.attendanceSubmitted || existing.status === 'Conducted') {
-      throw new Error(
-        'Attendance has already been submitted for this session. Use the Correction workflow to modify submitted records.'
-      );
-    }
     if (existing.status === 'Cancelled' || existing.status === 'Rescheduled') {
       throw new Error(`Cannot submit attendance for a ${existing.status.toLowerCase()} session.`);
     }
 
-    if (this.mode === 'mongodb') {
-      if (newRecords.length > 0) {
-        await AttendanceRecordModel.insertMany(newRecords);
-      }
-      const updated = await ClassSessionModel.findOneAndUpdate(
-        { id: sessionId },
-        {
-          $set: {
-            status: 'Conducted',
-            attendanceSubmitted: true,
-            ...(topicUpdate?.trim() ? { topic: topicUpdate.trim() } : {}),
-          },
-        },
-        { new: true }
-      ).lean();
-      return updated as unknown as ClassSession;
+    const defaultActor = actor || {
+      id: existing.facultyId,
+      name: existing.facultyName,
+      role: 'faculty',
+    };
+
+    for (const rec of newRecords) {
+      await this.createOrUpdateAttendanceRecord({
+        classId: sessionId,
+        studentId: rec.studentId,
+        status: (rec.status === 'Corrected' ? 'Present' : rec.status) as 'Present' | 'Absent' | 'Excused',
+        recordSource: rec.recordSource || 'Faculty Register',
+        actor: defaultActor,
+        reason: 'Class register submission',
+      });
     }
 
-    for (const nr of newRecords) {
-      const sessId = nr.attendanceSessionId || nr.classId;
-      const dup = this.state.records.find(
-        (r) => r.studentId === nr.studentId && (r.attendanceSessionId || r.classId) === sessId
-      );
-      if (dup) {
-        throw new Error(
-          `Duplicate attendance entry blocked for student ${nr.studentId} in session ${sessId}.`
-        );
-      }
-    }
-
-    this.state.records.push(...newRecords);
-    const idx = this.state.classes.findIndex((c) => c.id === sessionId);
-    this.state.classes[idx] = {
-      ...this.state.classes[idx],
+    const updated = await this.updateClassSession(sessionId, {
       status: 'Conducted',
       attendanceSubmitted: true,
       ...(topicUpdate?.trim() ? { topic: topicUpdate.trim() } : {}),
-    };
-    this.persistLocal();
-    return this.state.classes[idx];
+    });
+
+    return updated || existing;
   }
 
   public async recordNewClassAttendance(
@@ -1212,6 +1718,7 @@ export class DataRepository {
     sectionId: string;
     subjectId: string;
     faculty: UserProfile;
+    classId?: string;
     durationMinutes?: number;
     classroom?: string;
     hostLatitude?: number;
@@ -1252,6 +1759,64 @@ export class DataRepository {
     );
 
     const now = Date.now();
+    const today = new Date().toISOString().split('T')[0];
+    const startTimeStr = new Date().toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const endTimeStr = new Date(now + duration * 60 * 1000).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+
+    // Resolve or bind Common Class Session
+    let boundClassSession: ClassSession | undefined;
+    if (params.classId) {
+      boundClassSession = (await this.getClassById(params.classId)) || undefined;
+    }
+    if (!boundClassSession) {
+      const allSessions = await this.getAllSessions();
+      boundClassSession = allSessions.find(
+        (c) =>
+          c.sectionId === section.id &&
+          c.subjectId === subject.id &&
+          c.date === today &&
+          c.status !== 'Cancelled' &&
+          c.status !== 'Rescheduled' &&
+          !c.attendanceSubmitted
+      );
+    }
+    if (!boundClassSession) {
+      boundClassSession = await this.createClassSession({
+        id: `cls-${section.id}-${subject.code.toLowerCase()}-${now}`,
+        sectionId: section.id,
+        sectionDisplayName: section.displayName,
+        subjectId: subject.id,
+        subjectCode: subject.code,
+        subjectName: subject.name,
+        date: today,
+        period: `Lecture (${startTimeStr})`,
+        startTime: startTimeStr,
+        endTime: endTimeStr,
+        durationHours: 1,
+        topic: `${subject.name} (Dynamic QR & Manual)`,
+        sessionType: 'Regular',
+        status: 'Conducted',
+        scheduledFacultyId: params.faculty.id,
+        scheduledFacultyName: params.faculty.name,
+        facultyId: params.faculty.id,
+        facultyName: params.faculty.name,
+        isSubstitute: false,
+        classroom: params.classroom || section.defaultClassroom || 'VB G19',
+        attendanceSubmitted: false,
+        approvalStatus: 'Approved',
+        createdBy: params.faculty.id,
+        isDemo: false,
+      });
+    }
+
     const sessionId = `qr-sess-${now}`;
     const qrIntervalMs = 5000; // strictly 5 seconds dynamic QR rotation
     const tokenExpiresAt = now + qrIntervalMs;
@@ -1259,6 +1824,7 @@ export class DataRepository {
 
     const newSession: QRAttendanceSession = {
       id: sessionId,
+      classId: boundClassSession.id,
       sectionId: section.id,
       sectionDisplayName: section.displayName,
       subjectId: subject.id,
@@ -1270,17 +1836,9 @@ export class DataRepository {
       hostLatitude: hostLat,
       hostLongitude: hostLng,
       hostAccuracy: hostAcc,
-      date: new Date().toISOString().split('T')[0],
-      startTime: new Date().toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }),
-      endTime: new Date(now + duration * 60 * 1000).toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }),
+      date: today,
+      startTime: startTimeStr,
+      endTime: endTimeStr,
       currentQrToken: token,
       tokenIssuedAt: now,
       tokenExpiresAt,
@@ -1305,13 +1863,13 @@ export class DataRepository {
     await this.appendAuditLog({
       id: `aud-${Date.now()}`,
       category: 'ATTENDANCE_RECORD',
-      attendanceRecordId: sessionId,
+      attendanceRecordId: boundClassSession.id,
       sectionId: section.id,
       sectionDisplayName: section.displayName,
       subjectId: subject.id,
       subjectCode: subject.code,
       subjectName: subject.name,
-      classId: sessionId,
+      classId: boundClassSession.id,
       classDate: newSession.date,
       classPeriod: 'Dynamic QR',
       studentId: 'all',
@@ -1843,50 +2401,41 @@ export class DataRepository {
           facultyName: session.facultyName,
           isSubstitute: false,
           classroom: session.classroom,
-          attendanceSubmitted: true,
+          attendanceSubmitted: false,
           approvalStatus: 'Approved',
           createdBy: session.facultyId,
           isDemo: false,
         });
       }
 
-      // Check existing record for this attendance session inside the lock
-      const existingRecord = (await this.getRecordsForStudent(params.student.id)).find(
-        (r) => (r.attendanceSessionId || r.classId) === session.id
-      );
+      // Route through unified Centralized Attendance Service
+      const upsertRes = await this.createOrUpdateAttendanceRecord({
+        classId: targetClassSession.id,
+        studentId: params.student.id,
+        status: 'Present',
+        recordSource: 'QR Geoverified',
+        actor: {
+          id: session.facultyId,
+          name: session.facultyName,
+          role: 'faculty',
+        },
+        isQrVerification: true,
+        reason: 'Dynamic QR attendance scan with verified facial identification and liveness.',
+      });
 
-      if (existingRecord) {
-        createdRecord = existingRecord;
+      if (upsertRes.conflictDetected) {
+        classification = 'REVIEW_REQUIRED';
+        rejectionOrReviewReason = upsertRes.conflictReason;
+        suspiciousSignals.push('MANUAL_ATTENDANCE_OVERRIDE_CONFLICT');
       } else {
-        const newRecord: AttendanceRecord = {
-          id: `rec-qr-${params.student.id}-${session.id}`,
-          studentId: params.student.id,
-          classId: targetClassSession.id,
-          attendanceSessionId: session.id,
-          sectionId: session.sectionId,
-          subjectId: session.subjectId,
-          status: 'Present',
-          effectivePresent: true,
-          originalStatus: 'Present',
-          recordSource: 'QR Geoverified',
-          recordedById: session.facultyId,
-          recordedByName: session.facultyName,
-          timestamp: new Date().toISOString(),
-          correctionVersion: 0,
-        };
-        try {
-          await this.insertAttendanceRecord(newRecord);
-          createdRecord = newRecord;
-        } catch (dupErr) {
-          // Handled duplicate key safely
-          const refetched = (await this.getRecordsForStudent(params.student.id)).find(
-            (r) => (r.attendanceSessionId || r.classId) === session.id
-          );
-          createdRecord = refetched || newRecord;
-        }
+        createdRecord = upsertRes.record;
       }
 
-      await this.incrementSessionCounter(session.id, 'verifiedCount');
+      if (classification === 'VERIFIED') {
+        await this.incrementSessionCounter(session.id, 'verifiedCount');
+      } else {
+        await this.incrementSessionCounter(session.id, 'reviewRequiredCount');
+      }
     } else if (classification === 'REVIEW_REQUIRED') {
       await this.incrementSessionCounter(session.id, 'reviewRequiredCount');
     } else {

@@ -17,15 +17,20 @@ import {
   ExternalLink,
   MapPin,
   ShieldCheck,
+  UserCheck,
+  QrCode as QrIcon,
 } from 'lucide-react';
 import { api } from '../api/client.ts';
 import {
   AttendanceSubmissionAttempt,
+  CentralizedAttendanceRosterItem,
+  CentralizedAttendanceSummary,
   ClassSession,
   FacultyAssignment,
   InstitutionalPolicy,
   QRAttendanceSession,
   RandomInClassVerification,
+  RecordSource,
   SubjectItem,
   UserProfile,
 } from '../shared/types.ts';
@@ -45,16 +50,28 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
   policy,
   facultyAssignments,
   subjects,
-  classes: _classes,
+  classes,
   cohortUsers,
   onSessionUpdated,
 }) => {
-  void _classes;
   // Available section and subject combinations for this faculty member
   const availablePairs = useMemo(() => {
     return facultyAssignments.filter((a) => a.facultyId === user.id && a.status === 'Active');
   }, [facultyAssignments, user.id]);
 
+  // Markable classes for this faculty member
+  const markableClasses = useMemo(() => {
+    return classes
+      .filter(
+        (c) =>
+          (user.role === 'admin' || c.facultyId === user.id || c.scheduledFacultyId === user.id) &&
+          c.status !== 'Cancelled' &&
+          c.status !== 'Rescheduled'
+      )
+      .sort((a, b) => `${b.date}T${b.startTime}`.localeCompare(`${a.date}T${a.startTime}`));
+  }, [classes, user]);
+
+  const [selectedClassId, setSelectedClassId] = useState<string>(() => markableClasses[0]?.id || '');
   const [selectedAssignmentId, setSelectedAssignmentId] = useState<string>(
     availablePairs[0]?.id || ''
   );
@@ -74,6 +91,26 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
   const [isLocatingHost, setIsLocatingHost] = useState<boolean>(false);
   const [hostCoords, setHostCoords] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
   const [hostGpsStatus, setHostGpsStatus] = useState<'pending' | 'acquired' | 'error'>('pending');
+
+  // Centralized Attendance Register state for active session
+  const [centralizedRoster, setCentralizedRoster] = useState<CentralizedAttendanceRosterItem[]>([]);
+  const [centralizedSummary, setCentralizedSummary] = useState<CentralizedAttendanceSummary | null>(null);
+  const [updatingStudentId, setUpdatingStudentId] = useState<string | null>(null);
+  const [isFinalizing, setIsFinalizing] = useState<boolean>(false);
+
+  // Auto-sync class selection with assignments & classroom
+  useEffect(() => {
+    if (selectedClassId) {
+      const cls = markableClasses.find((c) => c.id === selectedClassId);
+      if (cls) {
+        const pair = availablePairs.find(
+          (a) => a.sectionId === cls.sectionId && a.subjectId === cls.subjectId
+        );
+        if (pair) setSelectedAssignmentId(pair.id);
+        if (cls.classroom) setClassroomInput(cls.classroom);
+      }
+    }
+  }, [selectedClassId, markableClasses, availablePairs]);
   const [hostGpsError, setHostGpsError] = useState<string | null>(null);
 
   // Anti-Screenshot & Screen Capture Protection State
@@ -324,6 +361,17 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
             };
           });
         }
+
+        const targetClassId = current.classId || data.session.classId;
+        if (targetClassId) {
+          try {
+            const classData = await api.getClassAttendance(targetClassId);
+            setCentralizedRoster(classData.roster);
+            setCentralizedSummary(classData.summary);
+          } catch {
+            // Quiet fallback
+          }
+        }
       } catch (err) {
         console.warn('Failed to poll session status:', err);
       }
@@ -402,6 +450,7 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
     const startWithCoords = async (hostLat: number, hostLng: number, hostAcc: number) => {
       try {
         const { session } = await api.createQrSession({
+          classId: selectedClassId || undefined,
           sectionId: selectedAssignment.sectionId,
           subjectId: selectedAssignment.subjectId,
           durationMinutes,
@@ -414,6 +463,12 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
         setAttempts([]);
         setVerifications([]);
         setIsLocatingHost(false);
+        if (session.classId) {
+          api.getClassAttendance(session.classId).then((res) => {
+            setCentralizedRoster(res.roster);
+            setCentralizedSummary(res.summary);
+          }).catch(() => {});
+        }
         if (onSessionUpdated) onSessionUpdated();
       } catch (err) {
         setIsLocatingHost(false);
@@ -451,6 +506,60 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
       if (onSessionUpdated) onSessionUpdated();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to close attendance session.');
+    }
+  };
+
+  // Interactive toggle for centralized attendance row
+  const handleToggleSingleStatus = async (
+    studentId: string,
+    status: 'Present' | 'Absent' | 'Excused'
+  ) => {
+    const targetClassId = activeSession?.classId;
+    if (!targetClassId) return;
+    setUpdatingStudentId(studentId);
+    try {
+      const res = await api.updateSingleAttendance({
+        classId: targetClassId,
+        studentId,
+        status,
+      });
+      setCentralizedRoster(res.roster);
+      setCentralizedSummary(res.summary);
+      if (onSessionUpdated) onSessionUpdated();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to update student attendance.');
+    } finally {
+      setUpdatingStudentId(null);
+    }
+  };
+
+  // Finalize Class from QR display
+  const handleFinalizeAttendance = async () => {
+    const targetClassId = activeSession?.classId;
+    if (!targetClassId) return;
+    const pendingCount = centralizedSummary?.pendingCount ?? 0;
+    if (
+      !window.confirm(
+        `Finalize attendance for this class? ${
+          pendingCount > 0 ? `${pendingCount} unrecorded students will be marked ABSENT in MongoDB.` : 'All students are recorded.'
+        }`
+      )
+    )
+      return;
+
+    setIsFinalizing(true);
+    try {
+      const res = await api.finalizeClassAttendance({ classId: targetClassId });
+      setCentralizedRoster(res.roster);
+      setCentralizedSummary(res.summary);
+      if (activeSession) {
+        setActiveSession((prev) => (prev ? { ...prev, status: 'CLOSED' } : null));
+      }
+      if (onSessionUpdated) onSessionUpdated();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to finalize attendance.');
+    } finally {
+      setIsFinalizing(false);
     }
   };
 
@@ -891,6 +1000,199 @@ export const FacultyQRAttendanceView: React.FC<FacultyQRAttendanceViewProps> = (
                   ))
                 )}
               </div>
+            </div>
+          </div>
+
+          {/* Official Centralized Attendance Register (Single Source of Truth) */}
+          <div className="bg-[#FAF3E3] border border-[#E3D2B4] rounded-lg overflow-hidden shadow-sm">
+            <div className="px-4 py-3 bg-[#165B33] text-white flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-serif font-bold text-xs flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-[#DF6A24]" />
+                  Centralized Attendance Register (attendancerecords)
+                </h3>
+                <div className="text-[11px] text-white/80 mt-0.5">
+                  Single source of truth in MongoDB · QR scans and teacher roll-call synchronized live every 3s
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isFinalizing}
+                  onClick={handleFinalizeAttendance}
+                  className="inline-flex items-center gap-1 rounded bg-[#DF6A24] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#c95818] disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  {isFinalizing ? 'Finalizing…' : 'Finalize Class (Mark Pending Absent)'}
+                </button>
+              </div>
+            </div>
+
+            {/* Stats Bar */}
+            {centralizedSummary && (
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 p-3 bg-white border-b border-[#E3D2B4] text-center text-xs">
+                <div className="p-2 bg-[#FFFDF8] rounded border border-[#E3D2B4]">
+                  <span className="text-[#6B5A4C] block text-[10px] font-semibold uppercase">Total Enrolled</span>
+                  <strong className="text-base font-bold text-[#241710]">{centralizedSummary.totalEnrolled}</strong>
+                </div>
+                <div className="p-2 bg-emerald-50 rounded border border-emerald-200">
+                  <span className="text-emerald-700 block text-[10px] font-semibold uppercase">Present</span>
+                  <strong className="text-base font-bold text-emerald-800">{centralizedSummary.presentCount}</strong>
+                </div>
+                <div className="p-2 bg-rose-50 rounded border border-rose-200">
+                  <span className="text-rose-700 block text-[10px] font-semibold uppercase">Absent</span>
+                  <strong className="text-base font-bold text-rose-800">{centralizedSummary.absentCount}</strong>
+                </div>
+                <div className="p-2 bg-amber-50 rounded border border-amber-200">
+                  <span className="text-amber-700 block text-[10px] font-semibold uppercase">Excused</span>
+                  <strong className="text-base font-bold text-amber-800">{centralizedSummary.excusedCount}</strong>
+                </div>
+                <div className="p-2 bg-slate-50 rounded border border-slate-200">
+                  <span className="text-slate-600 block text-[10px] font-semibold uppercase">Pending</span>
+                  <strong className="text-base font-bold text-slate-800">{centralizedSummary.pendingCount}</strong>
+                </div>
+                <div className="p-2 bg-emerald-50/70 rounded border border-emerald-300 flex flex-col justify-center">
+                  <span className="text-[#165B33] block text-[10px] font-semibold uppercase">Completion</span>
+                  <strong className="text-base font-bold text-[#165B33]">{centralizedSummary.completionPercentage}%</strong>
+                </div>
+              </div>
+            )}
+
+            {/* Register Table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-[#FFFDF8] border-b border-[#E3D2B4] text-[#6B5A4C] font-semibold">
+                    <th className="py-2.5 px-3 w-36">USN</th>
+                    <th className="py-2.5 px-3">Student Name</th>
+                    <th className="py-2.5 px-3">Current Status</th>
+                    <th className="py-2.5 px-3">Recording Method</th>
+                    <th className="py-2.5 px-3 hidden sm:table-cell">Marked Time</th>
+                    <th className="py-2.5 px-3 text-right">Register Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E3D2B4]/60 bg-white">
+                  {centralizedRoster.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-6 px-3 text-center text-[#6B5A4C]">
+                        Loading unified student roster...
+                      </td>
+                    </tr>
+                  ) : (
+                    centralizedRoster.map((item) => {
+                      const isUpdating = updatingStudentId === item.studentId;
+                      const formattedTime = item.timestamp
+                        ? new Date(item.timestamp).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                          })
+                        : '—';
+
+                      return (
+                        <tr key={item.studentId} className="hover:bg-[#FAF3E3]/40 transition-colors">
+                          <td className="py-2 px-3 font-mono font-bold text-[#241710] whitespace-nowrap">
+                            {item.studentIdentifier}
+                          </td>
+                          <td className="py-2 px-3 font-medium text-[#241710]">
+                            {item.studentName}
+                          </td>
+                          <td className="py-2 px-3 whitespace-nowrap">
+                            {item.status === 'Present' && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                PRESENT
+                              </span>
+                            )}
+                            {item.status === 'Absent' && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-100 text-rose-800 border border-rose-300">
+                                <XCircle className="w-3.5 h-3.5 text-rose-600" />
+                                ABSENT
+                              </span>
+                            )}
+                            {item.status === 'Excused' && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-800 border border-amber-300">
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                                EXCUSED
+                              </span>
+                            )}
+                            {item.status === 'Pending' && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-600 border border-dashed border-slate-300">
+                                <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                NOT RECORDED
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 whitespace-nowrap">
+                            {item.verificationMethod === 'QR' && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold tracking-wide bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                <QrIcon className="w-3 h-3 text-emerald-600" />
+                                QR VERIFIED
+                              </span>
+                            )}
+                            {item.verificationMethod === 'Manual' && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold tracking-wide bg-blue-50 text-blue-800 border border-blue-200">
+                                <UserCheck className="w-3 h-3 text-blue-600" />
+                                MANUAL
+                              </span>
+                            )}
+                            {item.verificationMethod === 'None' && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-slate-400 bg-slate-50 border border-slate-200">
+                                <Clock className="w-3 h-3 text-slate-400" />
+                                PENDING
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 font-mono text-[11px] text-[#6B5A4C] hidden sm:table-cell whitespace-nowrap">
+                            {formattedTime}
+                          </td>
+                          <td className="py-2 px-3 text-right whitespace-nowrap">
+                            <div className="inline-flex rounded border border-[#E3D2B4] bg-[#FAF3E3] p-0.5">
+                              <button
+                                type="button"
+                                disabled={isUpdating}
+                                onClick={() => handleToggleSingleStatus(item.studentId, 'Present')}
+                                className={`rounded px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                                  item.status === 'Present'
+                                    ? 'bg-[#165B33] text-white shadow-sm'
+                                    : 'text-[#6B5A4C] hover:text-[#241710]'
+                                } disabled:opacity-50`}
+                              >
+                                Present
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isUpdating}
+                                onClick={() => handleToggleSingleStatus(item.studentId, 'Absent')}
+                                className={`rounded px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                                  item.status === 'Absent'
+                                    ? 'bg-[#B42318] text-white shadow-sm'
+                                    : 'text-[#6B5A4C] hover:text-[#241710]'
+                                } disabled:opacity-50`}
+                              >
+                                Absent
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isUpdating}
+                                onClick={() => handleToggleSingleStatus(item.studentId, 'Excused')}
+                                className={`rounded px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                                  item.status === 'Excused'
+                                    ? 'bg-[#DF6A24] text-white shadow-sm'
+                                    : 'text-[#6B5A4C] hover:text-[#241710]'
+                                } disabled:opacity-50`}
+                              >
+                                Excused
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

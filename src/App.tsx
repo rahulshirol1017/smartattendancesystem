@@ -396,6 +396,7 @@ export default function App() {
           onStartCorrectionForRecord={handleStartCorrectionForRecord}
           onOpenSubjectReport={handleOpenSubjectReport}
           onRefreshWorkspace={loadWorkspaceData}
+          onNavigate={handleSectionNavigate}
         />
       )}
 
