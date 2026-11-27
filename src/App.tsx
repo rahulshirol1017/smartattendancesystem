@@ -93,6 +93,10 @@ export default function App() {
 
   const syncDomainUrl = useCallback((role: UserRole, section: NavigationSection) => {
     try {
+      // Never overwrite the mobile camera attendance route
+      if (window.location.pathname.toLowerCase().startsWith('/attend')) {
+        return;
+      }
       const targetPath = getDomainRoutePath(role, section);
       if (window.location.pathname !== targetPath) {
         window.history.replaceState(null, '', targetPath);
@@ -111,7 +115,9 @@ export default function App() {
       if (session.user) {
         const boot = await api.getBootstrap();
         setWorkspace(boot);
-        syncDomainUrl(boot.user.role, 'dashboard');
+        if (!window.location.pathname.toLowerCase().startsWith('/attend')) {
+          syncDomainUrl(boot.user.role, 'dashboard');
+        }
       } else {
         setWorkspace(null);
       }
@@ -129,7 +135,7 @@ export default function App() {
   }, [loadWorkspaceData]);
 
   useEffect(() => {
-    if (workspace) {
+    if (workspace && !window.location.pathname.toLowerCase().startsWith('/attend')) {
       syncDomainUrl(workspace.user.role, activeSection);
     }
   }, [workspace, activeSection, syncDomainUrl]);

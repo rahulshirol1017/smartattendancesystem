@@ -4,6 +4,7 @@ import { api, verificationApi } from '../api/client.ts';
 import {
   BlinkLivenessTracker,
   Point2D,
+  QUALITY_THRESHOLDS,
   TrackedFaceFrame,
   areFaceModelsLoaded,
   captureEvidenceFrameJpeg,
@@ -705,9 +706,9 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                     detected.guidance.centeredOk &&
                     detected.guidance.sizeOk &&
                     detected.quality.withinBounds &&
-                    detected.quality.sharpnessScore >= 12 &&
-                    detected.quality.luminanceScore >= 18 &&
-                    detected.quality.luminanceScore <= 248;
+                    detected.quality.sharpnessScore >= QUALITY_THRESHOLDS.minSharpnessVariance &&
+                    detected.quality.luminanceScore >= QUALITY_THRESHOLDS.minLuminance &&
+                    detected.quality.luminanceScore <= QUALITY_THRESHOLDS.maxLuminance;
 
                   if (!spatialQualityOk) {
                     setUiState({
@@ -755,7 +756,8 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                                 phase: 'blink',
                                 message: `Identity Confirmed: ${identRes.studentName} (${identRes.matchedUsn}). Please blink naturally.`,
                               });
-                            } else {
+                            } else if (identRes.status === 'NO_USER_FOUND') {
+                              // Verified by ArcFace against all enrolled students, no match found
                               identifyAttemptsRef.current += 1;
                               if (identifyAttemptsRef.current >= 4) {
                                 emitFailure(
@@ -766,18 +768,32 @@ export const FacialVerification: React.FC<FacialVerificationProps> = ({
                               } else {
                                 setUiState({
                                   phase: 'position',
-                                  message: `${identRes.message || 'Align face clearly...'} (${identifyAttemptsRef.current}/3)`,
+                                  message: `${identRes.message || 'No User Found'} (${identifyAttemptsRef.current}/3)`,
                                 });
                                 setTimeout(() => {
                                   identityCheckingRef.current = false;
-                                }, 700);
+                                }, 800);
                               }
+                            } else {
+                              // Temporary frame positioning/quality feedback (e.g. POOR_QUALITY, NO_FACE)
+                              setUiState({
+                                phase: 'position',
+                                message: identRes.message || 'Align face clearly inside frame...',
+                              });
+                              setTimeout(() => {
+                                identityCheckingRef.current = false;
+                              }, 600);
                             }
                           })
-                          .catch(() => {
+                          .catch((err) => {
+                            console.warn('[VTU Verification] identifyFace network or server error:', err);
+                            setUiState({
+                              phase: 'position',
+                              message: 'Connecting to face recognition service...',
+                            });
                             setTimeout(() => {
                               identityCheckingRef.current = false;
-                            }, 700);
+                            }, 800);
                           });
                       } else {
                         identityCheckingRef.current = false;

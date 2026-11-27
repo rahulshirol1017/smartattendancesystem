@@ -60,18 +60,51 @@ export const MobileAttendanceView: React.FC<MobileAttendanceViewProps> = ({
     message?: string;
   } | null>(null);
 
-  // Parse parameters from window.location.search
+  // Parse parameters from window.location.search and check for active verification session
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const sId = params.get('sessionId') || '';
     const token = params.get('token') || '';
 
-    if (!sId || !token) {
+    if (!sId) {
       setFlowState('no_params');
       return;
     }
 
     setSessionId(sId);
+
+    // Check if an unexpired verification session exists in sessionStorage for this sessionId
+    const storageKey = `vtu_attend_session_${sId}`;
+    try {
+      const storedJson = sessionStorage.getItem(storageKey);
+      if (storedJson) {
+        const stored = JSON.parse(storedJson);
+        const age = Date.now() - (stored.claimedAt || 0);
+        // Valid for up to 4.5 minutes (backend allows 5 minutes)
+        if (stored.verificationSessionId && stored.sessionToken && age < 4.5 * 60 * 1000) {
+          setVerificationSessionId(stored.verificationSessionId);
+          setSessionToken(stored.sessionToken);
+          setChallengeType(stored.challengeType || 'BLINK_AND_HEAD_LEFT');
+          setChallengeInstruction(
+            stored.challengeInstruction || 'Look straight at the camera and blink once naturally.'
+          );
+          setSessionInfo(stored.sessionInfo);
+          setFlowState('verifying_face');
+          return;
+        } else {
+          sessionStorage.removeItem(storageKey);
+        }
+      }
+    } catch {
+      // Ignore storage read error
+    }
+
+    if (!token) {
+      // No active stored session and no token provided in URL
+      setFlowState('no_params');
+      return;
+    }
+
     setQrToken(token);
     claimAndValidateSession(sId, token);
   }, []);
@@ -117,11 +150,33 @@ export const MobileAttendanceView: React.FC<MobileAttendanceViewProps> = ({
 
       setVerificationSessionId(res.verificationSessionId);
       setSessionToken(res.sessionToken);
-      setChallengeType(res.challengeType || 'BLINK_AND_HEAD_LEFT');
-      setChallengeInstruction(
-        res.challengeInstruction || 'Look straight at the camera and blink once naturally.'
-      );
+      const challenge = res.challengeType || 'BLINK_AND_HEAD_LEFT';
+      const instruction =
+        res.challengeInstruction || 'Look straight at the camera and blink once naturally.';
+      setChallengeType(challenge);
+      setChallengeInstruction(instruction);
       setSessionInfo(res.sessionInfo);
+
+      // Persist to sessionStorage so page refreshes retain the 5-minute session
+      try {
+        sessionStorage.setItem(
+          `vtu_attend_session_${sId}`,
+          JSON.stringify({
+            verificationSessionId: res.verificationSessionId,
+            sessionToken: res.sessionToken,
+            sessionInfo: res.sessionInfo,
+            challengeType: challenge,
+            challengeInstruction: instruction,
+            claimedAt: Date.now(),
+          })
+        );
+        // Clean expired 5-second qrToken from URL search so refresh doesn't re-submit it
+        const cleanUrl = `${window.location.pathname}?sessionId=${encodeURIComponent(sId)}`;
+        window.history.replaceState(null, '', cleanUrl);
+      } catch {
+        // Ignore storage write error
+      }
+
       setFlowState('verifying_face');
     } catch (err) {
       setFlowState('validation_error');
@@ -136,6 +191,14 @@ export const MobileAttendanceView: React.FC<MobileAttendanceViewProps> = ({
   const handleFacialVerificationComplete = useCallback(
     (result: VerificationResult) => {
       if (result.verificationStatus === 'VERIFIED') {
+        // Clear active session from sessionStorage once attendance is recorded
+        try {
+          if (sessionId) {
+            sessionStorage.removeItem(`vtu_attend_session_${sessionId}`);
+          }
+        } catch {
+          // Ignore
+        }
         const studentName =
           result.attempt?.studentName ||
           (result as any).student?.name ||
@@ -260,11 +323,24 @@ export const MobileAttendanceView: React.FC<MobileAttendanceViewProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => claimAndValidateSession(sessionId, qrToken)}
+              onClick={() => {
+                if (sessionId) {
+                  try {
+                    sessionStorage.removeItem(`vtu_attend_session_${sessionId}`);
+                  } catch {
+                    // Ignore
+                  }
+                }
+                if (qrToken) {
+                  claimAndValidateSession(sessionId, qrToken);
+                } else {
+                  setFlowState('no_params');
+                }
+              }}
               className="w-full py-2.5 px-4 bg-[#DF6A24] hover:bg-[#c95b1b] text-white rounded-lg text-xs font-semibold shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <RefreshCw className="w-4 h-4" />
-              <span>Retry Scan</span>
+              <span>{qrToken ? 'Retry Scan' : 'Scan Live QR Code'}</span>
             </button>
           </div>
         )}
@@ -282,7 +358,16 @@ export const MobileAttendanceView: React.FC<MobileAttendanceViewProps> = ({
               challengeType={challengeType}
               challengeInstruction={challengeInstruction}
               onComplete={handleFacialVerificationComplete}
-              onCancel={() => setFlowState('no_params')}
+              onCancel={() => {
+                if (sessionId) {
+                  try {
+                    sessionStorage.removeItem(`vtu_attend_session_${sessionId}`);
+                  } catch {
+                    // Ignore
+                  }
+                }
+                setFlowState('no_params');
+              }}
             />
           </div>
         )}

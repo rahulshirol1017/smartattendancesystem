@@ -12,7 +12,7 @@ export const QUALITY_THRESHOLDS = {
   minInterOcularPx: 22,
   minLuminance: 18,
   maxLuminance: 248,
-  minSharpnessVariance: 12,
+  minSharpnessVariance: 10,
   maxAbsYawDeg: 30,
   maxAbsPitchDeg: 26,
   maxAbsRollDeg: 26,
